@@ -1,0 +1,43 @@
+/* SPDX-License-Identifier: MIT - Copyright (c) 2026 Marco Pistella (see the file LICENSE) */
+/* Version resource of ADFDMSView.dll (compiled by build.bat with windres and linked into the DLL).
+ * The version is the one that Far reads for the plug-in: keep it equal to Info->Version in GetGlobalInfoW
+ * (adfdmsview.c); build.bat checks it. */
+#include <winver.h>
+
+#define VER_MAJOR     2
+#define VER_MINOR     2
+#define VER_PATCH     2
+#define VER_BUILD     0
+#define VER_STRING    "2.2.2.0"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+PRODUCTVERSION VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_DLL
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"                    /* English (US), Unicode */
+        BEGIN
+            VALUE "CompanyName",      "Marco Pistella\0"
+            VALUE "FileDescription",  "ADFDMSView - Far Manager plug-in for Amiga ADF/DMS disk images\0"
+            VALUE "FileVersion",      VER_STRING "\0"
+            VALUE "InternalName",     "ADFDMSView\0"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Marco Pistella. MIT License.\0"
+            VALUE "License",          "MIT\0"
+            VALUE "OriginalFilename", "ADFDMSView.dll\0"
+            VALUE "ProductName",      "ADFDMSView\0"
+            VALUE "ProductVersion",   VER_STRING "\0"
+            VALUE "Author",           "Marco Pistella\0"
+            VALUE "Year",             "2026\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 0x04B0
+    END
+END

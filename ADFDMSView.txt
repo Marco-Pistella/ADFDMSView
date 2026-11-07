@@ -1,0 +1,402 @@
+ADFDMSView
+Far Manager 3 plug-in (32 and 64-bit), version 2.2.2
+Author: Marco Pistella
+License: MIT (see section 10)
+====================================================================================================
+
+CONTENTS
+
+  1. What it does
+  2. Requirements and installation
+  3. Supported formats
+  4. Using the panel
+  5. Damaged DMS archives
+  6. Damaged ADF disks
+  7. Limits
+  8. Languages
+  9. Building from source
+ 10. License
+
+
+1. WHAT IT DOES
+----------------------------------------------------------------------------------------------------
+
+ADFDMSView opens Amiga disk images in Far Manager as if they were folders. An ADF disk
+image (OFS or FFS file system) or a DMS disk archive appears as a virtual panel in which you
+can:
+
+  - browse the directory tree of the Amiga disk;
+  - view files (F3);
+  - copy files, and whole directories with everything under them, to an ordinary folder (F5).
+
+What sets the plug-in apart is that it keeps working on damaged material. Old floppy disks and old
+archives are often truncated, bit-rotted, or have lost a few bytes. The plug-in checks what it
+reads, repairs what can be repaired, brings back files that the directory tree no longer reaches,
+and tells you, item by item, what is complete, what is partial and what is lost.
+
+The plug-in is read-only: nothing is ever written to the image or to the archive.
+
+
+2. REQUIREMENTS AND INSTALLATION
+----------------------------------------------------------------------------------------------------
+
+  - Far Manager 3.0 (build 3000 or later), 32 or 64-bit: use the DLL of the same bitness as Far
+    (x86\ADFDMSView.dll or x64\ADFDMSView.dll).
+
+  - Put ADFDMSView.dll and the language file (ADFDMSViewEng.lng) together in a
+    folder of their own under the Far plug-ins folder, for example
+
+        %FARHOME%\Plugins\ADFDMSView\
+
+    and restart Far. Far looks for the language files in the folder of the DLL, so the folder
+    must not be shared with another plug-in.
+
+  - To open a disk, put the cursor on a .adf or .dms file and press Ctrl+PgDn (Enter may do
+    the same, depending on the file associations you have defined).
+
+  - Far offers a file to the plug-in by its extension: any .adf file is opened; a .dms file
+    is opened if its content looks like a DMS archive (the check also accepts an archive whose
+    signature or first track header is damaged).
+  - If the plug-in recognizes a file but cannot open it (an encrypted archive, ...), a box says
+    why (section 3) and Far does nothing else with the file.
+
+
+3. SUPPORTED FORMATS
+----------------------------------------------------------------------------------------------------
+
+ADF disk images (.adf)
+
+  - Raw dumps of Amiga disks with the OFS or FFS file system. The usual sizes are 901,120 bytes
+    (DD, 880 KB) and 1,802,240 bytes (HD, 1760 KB), but any image of at least 8 blocks (4,096
+    bytes) is accepted, up to 512 MiB.
+  - Bootblocks DOS\0 to DOS\7. Every flavor that means FFS (DOS\1, \3, \5, \7) is read as FFS. The
+    international and directory-cache variants are read through the normal hash tables.
+  - Files of any size, including files of more than 72 blocks (the extension blocks are followed),
+    and any number of entries per directory.
+
+DMS disk archives (.dms)
+
+  - DMS archives of a floppy disk, with every compression mode: no compression, simple (RLE),
+    quick, medium, deep, heavy 1 and heavy 2.
+  - Standard 80-cylinder DD and HD disks, and the layout of 160 half-cylinder tracks of 5,632
+    bytes.
+  - The archive is unpacked in memory into a disk image, which is then read like any ADF.
+  - An archive whose signature or first track header is damaged is still recognized and read.
+
+Not opened (a box says why, and Far does nothing else with the file):
+
+  - encrypted DMS archives;
+  - DMS archives that do not hold a disk image (disk type 7);
+  - DMS archives in which no disk track can be found;
+  - files that cannot be read, shorter than 56 bytes or larger than 512 MiB;
+  - a file for which there is not enough memory.
+
+While Far searches inside archives, or works silently, no box is shown and the file is simply
+declined, so that other plug-ins can try it.
+
+
+4. USING THE PANEL
+----------------------------------------------------------------------------------------------------
+
+Browsing and copying
+
+  - Enter goes into a directory; ".." goes back up, as far as the root of the disk.
+  - F3 views a file (Far extracts it to a temporary folder first).
+  - F5 copies the selected items. A selected directory is copied with all its subdirectories.
+    A dialog like the copy dialog of Far asks where to copy: the folder of the other panel is
+    proposed; a relative path is taken from it, a folder that does not exist is made, and the
+    history of the field is kept (Ctrl+Down opens it).
+  - "Already existing files" says what to do with a file that is already at the destination: Ask
+    (a box for every such file, with Overwrite, Skip, Overwrite all, Skip all and Cancel),
+    Overwrite, or Skip. The choice is proposed again until Far is closed. Cancel in the dialog, or
+    in the box, copies nothing more.
+  - F3 (view) and F4 (edit) copy the file to a temporary folder without a dialog.
+  - A file that cannot be read completely is still copied: the blocks that cannot be read are
+    replaced by zeros (the Description column says "incomplete"). A file of which nothing can be
+    read is not copied, and neither is an item whose destination path would be longer than 259
+    characters: at the end a box tells how many items could not be copied.
+
+Read-only
+
+  - Nothing can be changed in an image or in an archive. F5 or F6 into the panel, F7, F8, Del, the
+    save of a file edited with F4, and F6 or Shift+F6 out of the panel (a move would delete the
+    items from the image) show a box that says that the panel is read-only; nothing is done.
+  - If a file edited with F4 cannot be saved back, Far keeps the edited copy in a temporary folder
+    and says where it is.
+  - To take items out of the panel, copy them with F5.
+
+Names
+
+  - Amiga names (Latin-1) are shown as Unicode names made valid for Windows. The characters that
+    Windows does not allow (< > : " / \ | ? *) and the control characters (codes 0-31 and 127-159)
+    become "_"; trailing dots and spaces become "_" (so "abc." is shown as "abc_", and a name made
+    only of dots or spaces, such as ".", as "_"); the names that Windows reserves (CON, PRN, AUX,
+    NUL, COM1-9, LPT1-9, also with the superscript digits 1, 2, 3 of Latin-1, and also followed by
+    an extension, even after spaces, such as "CON .txt") get a "_" in front.
+  - Two items of a directory that would get the same name (the case does not count, also for the
+    accented letters) are told apart with "~2", "~3", and so on after the name that the second one
+    had: "foo", "foo", "foo" are shown as "foo", "foo~2", "foo~3".
+  - Items are shown as ordinary files and directories. Dates, protection bits and file comments are
+    not shown. Hard links and soft links are not listed.
+
+Special items in the root of the panel
+
+  <name>.adf             Only for DMS archives: the disk image unpacked from the archive.
+                         Copy it (F5) to get an ordinary ADF file for an emulator.
+  _RECOVERED             Only if something was recovered: the files and data blocks that the
+                         directory tree does not reach (see section 6).
+  _RECOVERY_REPORT.txt   Only if damage was found: a text that lists what the readers found and
+                         repaired, one line per finding. Lines that start with "ERROR:" are
+                         problems, lines that start with "note:" are repairs and other remarks.
+
+Description column
+
+  The Description column (the Descriptions panel mode, Ctrl+6 by default) tells what is special
+  about an item:
+
+    unreadable                                  nothing of the file can be read
+    incomplete (unreadable blocks)              some blocks of the file cannot be read
+    size taken from the data blocks             the size field of the file was wrong
+    recovered from the header                   a file of _RECOVERED
+    data blocks without a header                a file of _RECOVERED made of orphan data blocks
+    files and data not reached by the           the _RECOVERED folder itself
+      directory tree
+    unpacked disk image                         the <name>.adf item
+    what was found and repaired                 the report
+
+Panel title
+
+  The title of the panel is "ADF: <file>" or "DMS: <file>". When the image or the archive had
+  damage, "[damaged]" is added.
+
+Information panel (Ctrl+L on the other panel)
+
+  Container Format     ADF image, or DMS compressed.
+  File System          Amiga OFS or FFS (and whether the bootblock is not a standard DOS one).
+  Disk Capacity        Size of the disk image in KB.
+  Bad Sectors          Number of damaged blocks found while reading the file system.
+  Bad Tracks           Number of damaged tracks (cylinders).
+  Bad Track List       The numbers of those tracks (or "None (disk intact)").
+  Root Block           valid / bad checksum (accepted) / missing (files recovered from headers) /
+                       no readable DOS file system.
+  Recovered            Files and groups of data blocks found outside the directory tree.
+  Incomplete Files     Files that cannot be read completely, and files that cannot be read at all.
+  DMS Tracks           Tracks right, repaired, and not verified.
+  DMS Tracks Missing   Tracks lost and tracks absent from the archive.
+  DMS Headers          Track headers that were damaged and repaired.
+  Details              Points to the report, when there is one.
+  Dir Block / Items    Block number of the current directory and number of items in it.
+
+  Some lines appear only when they apply: Recovered, Incomplete Files, DMS Headers, Details, and the
+  DMS lines (only for archives). For an intact disk the list of bad tracks says
+  "None (disk intact)".
+
+An .adf file that is not an Amiga DOS disk
+
+  It still opens, as a panel that holds only _RECOVERY_REPORT.txt, which says why the disk could
+  not be read.
+
+
+5. DAMAGED DMS ARCHIVES
+----------------------------------------------------------------------------------------------------
+
+Verification. Every track is checked twice: the CRC-16 of its packed data and the 16-bit checksum of
+the unpacked track must be those written in the track header. The state of each track of the disk
+is known:
+
+    right          CRC and checksum are right.
+    repaired       The header or the packed data were damaged and were repaired. After the
+                   repair CRC and checksum are right.
+    not verified   The packed data are intact (CRC) but the checksum of the track is not the
+                   expected one. The track is kept.
+    best effort    The data are damaged and could not be repaired. What was unpacked is kept: the
+                   part before the damage is right. Tracks that copy from such a track are kept
+                   the same way.
+    lost           The track is in the archive but could not be recovered. It is written as zeros.
+    absent         The track is not in the archive. It is written as zeros.
+
+A disk of 80 cylinders (DD or HD) is always written at its full size; missing tracks are zeros.
+Tracks that are lost, best effort or not verified, and tracks that are absent although the archive
+announces them, are counted as bad tracks.
+
+Headers. A track header (20 bytes) damaged in one or two bytes, or only in its CRC field, is
+repaired, so that the track, and the tracks that depend on it, are not lost. The archive is also
+recognized when its "DMS!" signature or its first track header is damaged. When a header cannot be
+repaired, the plug-in looks for the next valid track header and goes on from there.
+
+Packed data. When the CRC of a track is wrong, the plug-in looks for what damaged the data and
+accepts a repair only if the checksum of the unpacked track is then right. It repairs:
+
+  - a burst of damage of up to 16 bits (one bit, one byte, two adjacent bytes, ...);
+  - two flipped bits anywhere in the track;
+  - one byte that was lost inside the track data;
+  - one byte that was added inside the track data.
+
+The search for repairs is limited, so that opening a damaged archive does not take for ever: 6
+seconds and 150,000 trial unpacks per archive (DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET in the
+source). If the limit stops a search, the report says so.
+
+Truncated and partly damaged data
+
+  - The data of a track are delimited by the next valid track header. A truncated last track is
+    unpacked as far as it goes.
+  - In the modes that keep a dictionary from one track to the next (quick, medium, deep, heavy),
+    the loss of one track does not spoil every track after it: tracks that do not need the lost
+    data are still unpacked and verified, the others are kept as best effort (heavy) or discarded
+    (quick, medium, deep).
+  - The decoders are bounds-checked. Incomplete Huffman tables and matches that run past the end of
+    the track are handled.
+
+
+6. DAMAGED ADF DISKS
+----------------------------------------------------------------------------------------------------
+
+The reader of ADF images goes on where a plain reader would give up:
+
+  - Size. An image whose size is not a multiple of 512 bytes (truncated, or with extra bytes at the
+    end) is read: the whole blocks are used.
+  - Bootblock. A bootblock that is not "DOS" (the custom bootblocks of games and demos) does not
+    matter when the root block is valid.
+  - Root block. A root block with a wrong checksum is accepted when its hash table still points at
+    header blocks of the image. If there is no usable root block at all, the image is scanned for
+    file headers (see _RECOVERED below).
+  - OFS or FFS. The flavor is read from the data blocks, not only from the bootblock: a bootblock
+    that says FFS on a disk whose files have OFS data blocks is read as OFS.
+  - OFS data blocks. When the block table of a file is damaged, lost, or points at a block of
+    another file, the data blocks are found by (file header, sequence number). A size field that
+    makes no sense is replaced by the size computed from the data blocks. A data block whose
+    header is damaged gives its data as they are.
+  - Block chains. Pointers outside the image, blocks that are not headers and cycles in the hash
+    chains are reported; the other entries of the directory are still read.
+
+The _RECOVERED folder. Files and data that the directory tree does not reach appear in the folder
+_RECOVERED, in the root of the panel:
+
+  - every file header that the tree does not reach is a file. Its path is rebuilt from the parent
+    pointers, through the directory headers that are still there, so the folders appear too;
+  - in an OFS disk, the data blocks of a file whose header is lost are grouped by the header they
+    name, ordered by sequence number, and shown as DATA_<block>.bin. Missing sequence numbers are
+    zeros.
+
+The recovery cannot tell a lost file from a deleted one: a file that was deleted from the disk but
+whose blocks are still there can also appear in _RECOVERED. That is the price of finding the files
+that really were lost.
+
+The Description column and the information panel say which items could not be read completely, and
+_RECOVERY_REPORT.txt lists what was found and repaired.
+
+
+7. LIMITS
+----------------------------------------------------------------------------------------------------
+
+  - Read-only: nothing can be written, deleted or created inside an image or an archive.
+  - Only the Amiga OFS and FFS file systems are read (not PFS, SFS and other ones).
+  - The whole image is held in memory: an ADF or a DMS archive of up to 512 MiB; a DMS archive is
+    also unpacked in memory. In the 32-bit version a very large image may not fit in the address
+    space of Far: a box then says that there is not enough memory.
+  - Names of up to 30 characters (the Amiga limit) are shown, converted as described in section 4.
+  - Directories nested more than about 60 levels deep are not entered.
+  - Encrypted DMS archives and DMS archives without a disk image are refused (section 3).
+  - If a memory allocation fails, the call that needed it is lost, Far goes on.
+  - The effort limits for repairs (DMS_REPAIR_SECONDS, DMS_REPAIR_BUDGET) and the largest file that
+    is opened (MAX_FILE_SIZE) are set at the top of the source and can be changed there.
+
+
+8. LANGUAGES
+----------------------------------------------------------------------------------------------------
+
+Every text that the panel shows (the "[damaged]" suffix of the title, the labels and values of the
+information panel, the descriptions of the items, the boxes that say why a file is not opened or
+that the panel is read-only, the copy dialog) comes from a Far language file (.lng) in the folder
+of the DLL.
+
+  ADFDMSViewEng.lng   English
+
+How it works
+
+  - Far loads the file whose ".Language=" line names its interface language (Options > Languages).
+    If there is no such file, it loads the English one.
+  - The English texts are also built into the DLL. Without any language file, the plug-in works in
+    English.
+
+Adding a language (no recompilation is needed)
+
+  1. Copy ADFDMSViewEng.lng to ADFDMSView<Language>.lng in the folder of the DLL.
+  2. On the first line, change the language to the name that Far uses for it (the word before the
+     comma, for example "German"; the text after the comma is only a description).
+  3. Translate the text of each message, between the double quotes.
+  4. Save the file as UTF-8 with BOM, and restart Far.
+
+Rules for a language file
+
+  - A message is a line that starts with a double quote. Far numbers the messages from 0 in the
+    order in which they appear, and the plug-in asks for them by number: keep every message, in the
+    same order. A file with fewer messages than the DLL expects makes Far report a bad language
+    file.
+  - Lines that do not start with a double quote (the // lines) are comments.
+  - Keep the placeholders (%u, %d, %ls) in the same order and of the same type as in the English
+    text. The comment above each message says what its placeholders are. A translation whose
+    placeholders differ from the English ones is not used: the English text is shown instead, so
+    a mistake cannot make Far crash.
+  - Do not use double quotes or backslashes inside a message, except the \" (an escaped double
+    quote) in the messages that already have it.
+
+What is not translated
+
+  - The recovery report (_RECOVERY_REPORT.txt) is written by the engine and is always in English.
+  - The names of the special items (_RECOVERED, _RECOVERY_REPORT.txt, <name>.adf) are the same in
+    every language.
+
+
+9. BUILDING FROM SOURCE
+----------------------------------------------------------------------------------------------------
+
+The plug-in is a single C file, adfdmsview.c, plus the version resource adfdmsview.rc (file version,
+author and year, shown in the Details tab of the DLL properties; keep its version equal to the one
+in GetGlobalInfoW: build.bat stops if they differ). Install MSYS2 (default C:\msys64) and put the
+plugin.hpp of Far 3 (the copy that can be included from C) in .\PluginSDK, or in the folder named by
+the variable FARSDK; build.bat also looks in the Headers.c subfolder of that folder and in the
+PluginSDK\Headers.c folder of an installed Far. Then, from the Windows command prompt:
+
+    build.bat          builds both versions, compressed with UPX
+    build.bat x64      builds .\x64\ADFDMSView.dll (64 bit)
+    build.bat x86      builds .\x86\ADFDMSView.dll (32 bit)
+    build.bat noupx    does not compress the DLLs (can be combined with x64 or x86)
+    build.bat zip      also creates ADFDMSView-<version>.zip, with the folders built, ADFDMSView.txt
+                       and LICENSE (needs tar.exe, which is part of Windows 10 and later)
+
+The language files (ADFDMSView*.lng) are copied next to each DLL. The
+compilers (mingw-w64-x86_64-gcc and mingw-w64-i686-gcc) and UPX (mingw-w64-x86_64-upx) are
+installed with pacman if they are missing; an upx.exe found through the UPX_EXE variable or the
+PATH is used first. The DLLs are built for size (about 50 KB before UPX). Some antivirus programs
+are suspicious of UPX-packed files: use "noupx" for a DLL that is not packed.
+
+The source has no __declspec(dllexport): the linker exports the functions that are not static, which
+are the entry points of the plug-in (every other function must stay static). The 32 bit DLL is linked
+with -Wl,--kill-at, so that these names are not decorated. After linking, build.bat checks with
+objdump that GetGlobalInfoW, SetStartupInfoW, GetPluginInfoW, AnalyseW, OpenW, GetOpenPanelInfoW,
+GetFindDataW, FreeFindDataW, ClosePanelW, SetDirectoryW, GetFilesW, PutFilesW, DeleteFilesW and
+MakeDirectoryW are exported with their plain names, and the previous DLL is deleted before linking,
+so that a failed build never leaves an old one behind.
+
+The engine alone (the DMS unpacker and the ADF reader, with no Win32 and no Far headers) is built
+with  gcc -DADF_CORE_ONLY ...
+
+To add a message to the panel: add a line to the list ADF_MESSAGES in the source (the identifier
+and its English text) and add the message at the same position in every .lng file, with a comment
+above it that names the placeholders.
+
+
+10. LICENSE
+----------------------------------------------------------------------------------------------------
+
+ADFDMSView is free software, released under the MIT License.
+Copyright (c) 2026 Marco Pistella.
+
+The full text of the license is in the file LICENSE, which is distributed together with the plug-in
+and must be kept in every copy or substantial portion of it. The language files (ADFDMSView*.lng) are
+part of the plug-in and are covered by the same license.
+
+The plug-in is provided "as is", without warranty of any kind (see LICENSE). It never writes to the
+images and archives that it opens, but what it recovers from damaged material may be incomplete:
+check _RECOVERY_REPORT.txt and keep a copy of anything that matters.
