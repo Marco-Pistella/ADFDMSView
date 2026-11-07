@@ -10,7 +10,7 @@ An ADF image (OFS or FFS) or a DMS disk archive shows up as a virtual panel in w
 
 What sets it apart is that it does not give up on bad material. Old floppy disks and old archives are often truncated, bit-rotted or missing a few bytes. ADFDMSView checks what it reads, repairs what can be repaired, brings back files that the directory tree no longer reaches, and tells you, item by item, what is complete, what is partial and what is lost.
 
-Current version: **2.2.2**. The DLL is small (about 50 KB before UPX compression) and comes in 32 and 64-bit builds.
+Current version: **2.3.0**. The DLL is small (about 50 KB before UPX compression) and comes in 32 and 64-bit builds.
 
 ## Features
 
@@ -21,6 +21,7 @@ Current version: **2.2.2**. The DLL is small (about 50 KB before UPX compression
 - **A written report**: `_RECOVERY_REPORT.txt` lists what was found and repaired, one line per finding.
 - **Clear status in Far**: the Description column flags unreadable and incomplete files; the information panel (<kbd>Ctrl</kbd>+<kbd>L</kbd>) shows bad sectors, bad tracks, root block state and DMS track statistics.
 - **Safe copy**: a file that cannot be read completely is still copied, with the unreadable blocks replaced by zeros.
+- **Original dates**: files and directories keep their Amiga date and time when copied out (the clock value is taken as local time), and the panel shows them and can sort by date.
 - **Windows-safe names**: Amiga (Latin-1) names are converted to valid Windows names; reserved names and duplicates are handled.
 - **Translatable**: every text comes from a Far `.lng` file; no recompilation is needed to add a language.
 
@@ -87,7 +88,8 @@ The search for repairs is bounded (6 seconds and 150,000 trial unpacks per archi
 
 - Read-only: nothing can be written, deleted or created inside an image or an archive.
 - The whole image is held in memory (up to 512 MiB, set by `MAX_FILE_SIZE`); a DMS archive is also unpacked in memory. In the 32-bit version a very large image may not fit in Far's address space.
-- Dates, protection bits and file comments are not shown; hard and soft links are not listed.
+- Only the last modification date is read; protection bits and file comments are not shown, and hard and soft links are not listed.
+- Items without an Amiga date (the unpacked `<name>.adf`, `_RECOVERY_REPORT.txt`, `_RECOVERED`, `DATA_<n>.bin`) and items whose header has an impossible date get the date of the copy.
 - Directories nested more than about 60 levels deep are not entered.
 - `_RECOVERED` cannot tell a lost file from a deleted one: a deleted file whose blocks are still on the disk can show up there.
 
@@ -117,7 +119,7 @@ build.bat            build both versions, compressed with UPX
 build.bat x64        build .\x64\ADFDMSView.dll (64 bit)
 build.bat x86        build .\x86\ADFDMSView.dll (32 bit)
 build.bat noupx      do not compress with UPX (can be combined with x64 or x86)
-build.bat zip        also create ADFDMSView-<version>.zip (needs tar.exe, Windows 10 or later)
+build.bat zip        also create ADFDMSView-<version>.zip, for example ADFDMSView-2.3.0.zip (needs tar.exe, Windows 10 or later)
 ```
 
 The language files are copied next to each DLL, and the zip contains the built folders, `ADFDMSView.txt` and `LICENSE`. The build stops if the version in `adfdmsview.rc` differs from the one in `GetGlobalInfoW`, and it checks with `objdump` that all the plug-in entry points are exported with their plain names. Some antivirus programs are suspicious of UPX-packed files: use `noupx` for an unpacked DLL.

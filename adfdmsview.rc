@@ -1,14 +1,16 @@
 /* SPDX-License-Identifier: MIT - Copyright (c) 2026 Marco Pistella (see the file LICENSE) */
 /* Version resource of ADFDMSView.dll (compiled by build.bat with windres and linked into the DLL).
  * The version is the one that Far reads for the plug-in: keep it equal to Info->Version in GetGlobalInfoW
- * (adfdmsview.c); build.bat checks it. */
+ * (adfdmsview.c); build.bat checks it.
+ * Windows and Far want four numbers: the build number is 0 and is not shown. VER_STRING (shown in the Details
+ * tab of the DLL, and used by build.bat for the name of the zip) is major.minor.patch. */
 #include <winver.h>
 
 #define VER_MAJOR     2
-#define VER_MINOR     2
-#define VER_PATCH     2
+#define VER_MINOR     3
+#define VER_PATCH     0
 #define VER_BUILD     0
-#define VER_STRING    "2.2.2.0"
+#define VER_STRING    "2.3.0"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION    VER_MAJOR, VER_MINOR, VER_PATCH, VER_BUILD

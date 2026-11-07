@@ -1,5 +1,5 @@
 ADFDMSView
-Far Manager 3 plug-in (32 and 64-bit), version 2.2.2
+Far Manager 3 plug-in (32 and 64-bit), version 2.3.0
 Author: Marco Pistella
 License: MIT (see section 10)
 ====================================================================================================
@@ -27,7 +27,8 @@ can:
 
   - browse the directory tree of the Amiga disk;
   - view files (F3);
-  - copy files, and whole directories with everything under them, to an ordinary folder (F5).
+  - copy files, and whole directories with everything under them, to an ordinary folder (F5), with
+    their original Amiga date and time.
 
 What sets the plug-in apart is that it keeps working on damaged material. Old floppy disks and old
 archives are often truncated, bit-rotted, or have lost a few bytes. The plug-in checks what it
@@ -115,6 +116,15 @@ Browsing and copying
     replaced by zeros (the Description column says "incomplete"). A file of which nothing can be
     read is not copied, and neither is an item whose destination path would be longer than 259
     characters: at the end a box tells how many items could not be copied.
+  - The copies keep the date and time of the Amiga files and directories (the last modification
+    date of the header block of the item): the date is set as the creation and last write time
+    of the copy. A directory gets its date after its contents have been copied. The Amiga has no
+    time zone: the clock value is taken as local time, so Windows shows the same date and time
+    that the Amiga showed. The panel shows the same date in its Date/Time columns, so it can also
+    be sorted by date. An item whose header has an impossible date (a damaged header) gets no
+    date: the copy has the date of the moment of the copy, and so do the items that have no Amiga
+    date (the unpacked <name>.adf, _RECOVERY_REPORT.txt, the folder _RECOVERED, DATA_<n>.bin).
+    Files of _RECOVERED keep the date of their header block.
 
 Read-only
 
@@ -136,8 +146,8 @@ Names
   - Two items of a directory that would get the same name (the case does not count, also for the
     accented letters) are told apart with "~2", "~3", and so on after the name that the second one
     had: "foo", "foo", "foo" are shown as "foo", "foo~2", "foo~3".
-  - Items are shown as ordinary files and directories. Dates, protection bits and file comments are
-    not shown. Hard links and soft links are not listed.
+  - Items are shown as ordinary files and directories, with their date and time. Protection bits
+    and file comments are not shown. Hard links and soft links are not listed.
 
 Special items in the root of the panel
 
@@ -295,6 +305,8 @@ _RECOVERY_REPORT.txt lists what was found and repaired.
     also unpacked in memory. In the 32-bit version a very large image may not fit in the address
     space of Far: a box then says that there is not enough memory.
   - Names of up to 30 characters (the Amiga limit) are shown, converted as described in section 4.
+  - Only the last modification date is read (not the creation date of the disk or the date of the
+    root block); protection bits and file comments are not read.
   - Directories nested more than about 60 levels deep are not entered.
   - Encrypted DMS archives and DMS archives without a disk image are refused (section 3).
   - If a memory allocation fails, the call that needed it is lost, Far goes on.
@@ -362,8 +374,9 @@ PluginSDK\Headers.c folder of an installed Far. Then, from the Windows command p
     build.bat x64      builds .\x64\ADFDMSView.dll (64 bit)
     build.bat x86      builds .\x86\ADFDMSView.dll (32 bit)
     build.bat noupx    does not compress the DLLs (can be combined with x64 or x86)
-    build.bat zip      also creates ADFDMSView-<version>.zip, with the folders built, ADFDMSView.txt
-                       and LICENSE (needs tar.exe, which is part of Windows 10 and later)
+    build.bat zip      also creates ADFDMSView-<version>.zip (for example ADFDMSView-2.3.0.zip),
+                       with the folders built, ADFDMSView.txt and LICENSE (needs tar.exe, which is
+                       part of Windows 10 and later)
 
 The language files (ADFDMSView*.lng) are copied next to each DLL. The
 compilers (mingw-w64-x86_64-gcc and mingw-w64-i686-gcc) and UPX (mingw-w64-x86_64-upx) are

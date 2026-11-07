@@ -2432,7 +2432,19 @@ typedef struct {
     size_t   nlen;
     uint32_t size;
     unsigned flags;                 /* AI_* */
+    uint32_t days, mins, ticks;     /* date of the header block: days since 1978-01-01, minutes since midnight, 1/50 s */
+    bool     has_date;              /* the three fields above are plausible */
 } adf_item_t;
+
+/* The date of a file or directory header block (the last modification, at BSIZE-92: days, minutes, ticks).
+ * Plausible: minutes < 1440, ticks < 3000, days within 400 years of 1978 (a damaged header gives no date). */
+static bool adf_header_date(const uint8_t *h, uint32_t *days, uint32_t *mins, uint32_t *ticks)
+{
+    *days  = read_be32(h + 420);
+    *mins  = read_be32(h + 424);
+    *ticks = read_be32(h + 428);
+    return *days < 146000u && *mins < 1440u && *ticks < 3000u;
+}
 #define AI_PARTIAL  1               /* incomplete: some blocks cannot be read */
 #define AI_LOST     2               /* nothing of the file can be read */
 #define AI_SIZEFIX  4               /* the size field was wrong: the size comes from the data blocks */
@@ -2458,6 +2470,7 @@ static void adf_list_dir(adf_img_t *img, uint32_t dir_blk, adf_item_t **out, siz
         p->is_dir = st == ST_USERDIR;
         memcpy(p->name, list[a].name, list[a].nlen);
         p->nlen = list[a].nlen;
+        p->has_date = adf_header_date(eh, &p->days, &p->mins, &p->ticks);
         if (!p->is_dir) {
             unsigned bad = 0;
             uint32_t bs = read_be32(eh + 324);
@@ -2692,7 +2705,39 @@ typedef struct {
     DWORD    Id;
     int      Kind;
     unsigned Flags;                 /* AI_* */
+    FILETIME Time;                  /* date of the Amiga file or directory, as a UTC FILETIME */
+    int      HasTime;               /* Time is valid */
 } ADFEntry;
+
+/* Amiga date (local time: days since 1978-01-01, minutes since midnight, ticks of 1/50 s) -> UTC FILETIME.
+ * The Amiga has no time zone: the clock value is taken as local time, so that Windows shows the same value. */
+static void amiga_to_filetime(uint32_t days, uint32_t mins, uint32_t ticks, FILETIME *out)
+{
+    ULARGE_INTEGER u;
+    FILETIME local;
+    SYSTEMTIME st, utc;
+
+    /* 137696 days from 1601-01-01 (the FILETIME epoch) to 1978-01-01 */
+    u.QuadPart = ((ULONGLONG)(days + 137696u) * 86400ull + (ULONGLONG)mins * 60ull) * 10000000ull;
+    local.dwLowDateTime  = u.LowPart;
+    local.dwHighDateTime = u.HighPart;
+    if (FileTimeToSystemTime(&local, &st)) {
+        st.wSecond       = (WORD)(ticks / 50u);
+        st.wMilliseconds = (WORD)((ticks % 50u) * 20u);
+        if (TzSpecificLocalTimeToSystemTime(NULL, &st, &utc) && SystemTimeToFileTime(&utc, out)) return;   /* DST of that date */
+        if (SystemTimeToFileTime(&st, &local) && LocalFileTimeToFileTime(&local, out)) return;
+    }
+    out->dwLowDateTime = out->dwHighDateTime = 0;
+}
+
+static void entry_set_time(ADFEntry *e, const uint8_t *hdr)
+{
+    uint32_t d, m, t;
+    if (hdr && adf_header_date(hdr, &d, &m, &t)) {
+        amiga_to_filetime(d, m, t, &e->Time);
+        e->HasTime = e->Time.dwLowDateTime || e->Time.dwHighDateTime;
+    }
+}
 
 typedef struct {
     int      Kind;                  /* EK_DIR or EK_RECDIR (the root is EK_DIR with the root block) */
@@ -3008,6 +3053,10 @@ static void build_real(PluginData *pd, uint32_t blk, ADFEntry **v, int *n, int *
         e->Id = it[i].blk;
         e->Size = it[i].size;
         e->Flags = it[i].flags;
+        if (it[i].has_date) {
+            amiga_to_filetime(it[i].days, it[i].mins, it[i].ticks, &e->Time);
+            e->HasTime = e->Time.dwLowDateTime || e->Time.dwHighDateTime;
+        }
     }
     free(it);
     make_names_unique(*v + first, *n - first);
@@ -3027,6 +3076,7 @@ static void build_rec(PluginData *pd, int32_t node, ADFEntry **v, int *n, int *c
             name_to_wide(a->rnode[i].name, a->rnode[i].nlen, e->Name, MAX_NAME);
             e->Kind = EK_RECDIR;
             e->Id = (DWORD)i;
+            if (a->rnode[i].dirblk) entry_set_time(e, adf_block(a, a->rnode[i].dirblk));
         }
     for (i = 0; i < a->nrfile; i++)
         if (a->rfile[i].node == node) {
@@ -3036,6 +3086,7 @@ static void build_rec(PluginData *pd, int32_t node, ADFEntry **v, int *n, int *c
             name_to_wide(h + 433, h[432] > 30 ? 30 : h[432], e->Name, MAX_NAME);
             e->Kind = EK_RECFILE;
             e->Id = a->rfile[i].blk;
+            entry_set_time(e, h);
             if ((uint64_t)bs > a->size) {
                 uint64_t sz = adf_oidx_size(a, a->rfile[i].blk);
                 e->Size = sz && sz <= a->size ? (DWORD)sz : 0;
@@ -3542,7 +3593,24 @@ static int may_write(const wchar_t *outpath, XCtx *x)
     return 0;
 }
 
-static void extract_file(PluginData *pd, int kind, DWORD id, const wchar_t *outpath, XCtx *x)
+/* the date of the Amiga item on a file or folder that was created (ft: NULL or zero = no date known) */
+static int has_time(const FILETIME *ft)
+{
+    return ft && (ft->dwLowDateTime || ft->dwHighDateTime);
+}
+
+static void set_folder_time(const wchar_t *path, const FILETIME *ft)
+{
+    HANDLE h;
+    if (!has_time(ft)) return;
+    h = CreateFileW(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFileTime(h, ft, NULL, ft);              /* a failure here is not an error of the copy */
+    CloseHandle(h);
+}
+
+static void extract_file(PluginData *pd, int kind, DWORD id, const wchar_t *outpath, XCtx *x, const FILETIME *ft)
 {
     const BYTE *buf;
     size_t size;
@@ -3557,6 +3625,7 @@ static void extract_file(PluginData *pd, int kind, DWORD id, const wchar_t *outp
             h = CreateFileW(outpath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (h != INVALID_HANDLE_VALUE) {
                 ok = write_all(h, buf, size);
+                if (ok && has_time(ft)) SetFileTime(h, ft, NULL, ft);     /* original date and time of the Amiga file */
                 CloseHandle(h);
             }
             if (owned) free((void *)buf);
@@ -3591,9 +3660,14 @@ static void extract_dir(PluginData *pd, int kind, DWORD id, const wchar_t *dest,
             continue;
         }
         if (v[i].Kind == EK_DIR || v[i].Kind == EK_RECDIR) {
-            if (make_folder(path)) extract_dir(pd, v[i].Kind, v[i].Id, path, depth + 1, x); else x->failed++;
+            if (make_folder(path)) {
+                extract_dir(pd, v[i].Kind, v[i].Id, path, depth + 1, x);
+                if (v[i].HasTime) set_folder_time(path, &v[i].Time);      /* after the contents: they change the folder's date */
+            } else {
+                x->failed++;
+            }
         } else {
-            extract_file(pd, v[i].Kind, v[i].Id, path, x);
+            extract_file(pd, v[i].Kind, v[i].Id, path, x, v[i].HasTime ? &v[i].Time : NULL);
         }
     }
     free(v);
@@ -3750,7 +3824,7 @@ static int copy_dialog(const struct GetFilesInfo *Info, wchar_t *typed, size_t t
 void WINAPI GetGlobalInfoW(struct GlobalInfo *Info) {
     Info->StructSize    = sizeof(struct GlobalInfo);
     Info->MinFarVersion = MAKEFARVERSION(3, 0, 0, 3000, VS_RELEASE);
-    Info->Version       = MAKEFARVERSION(2, 2, 2, 0, VS_RELEASE);
+    Info->Version       = MAKEFARVERSION(2, 3, 0, 0, VS_RELEASE);     /* 2.3.0: Far wants four numbers, the build is 0 */
     Info->Guid          = MainGuid;
     Info->Title         = PLUGIN_NAME;
     Info->Description   = PLUGIN_DESC;
@@ -3956,6 +4030,11 @@ intptr_t WINAPI GetFindDataW(struct GetFindDataInfo *Info) {
         items[i].FileAttributes = is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
         items[i].FileSize = e->Size;
         items[i].NumberOfLinks = 1;
+        if (e->HasTime) {
+            items[i].LastWriteTime = e->Time;
+            items[i].CreationTime  = e->Time;
+            items[i].LastAccessTime = e->Time;
+        }
         items[i].UserData.Data = (void *)(((uintptr_t)e->Kind << 28) | (uintptr_t)(e->Id & 0x0FFFFFFFu));
         if (e->Flags & AI_LOST)             items[i].Description = GetMsg(MDescUnreadable);
         else if (e->Flags & AI_PARTIAL)     items[i].Description = GetMsg(MDescIncomplete);
@@ -4052,9 +4131,14 @@ intptr_t WINAPI GetFilesW(struct GetFilesInfo *Info) {
             continue;
         }
         if (kind == EK_DIR || kind == EK_RECDIR) {
-            if (make_folder(outpath)) extract_dir(pd, kind, id, outpath, 0, &x); else x.failed++;
+            if (make_folder(outpath)) {
+                extract_dir(pd, kind, id, outpath, 0, &x);
+                set_folder_time(outpath, &item->LastWriteTime);           /* after the contents: they change the folder's date */
+            } else {
+                x.failed++;
+            }
         } else {
-            extract_file(pd, kind, id, outpath, &x);
+            extract_file(pd, kind, id, outpath, &x, &item->LastWriteTime);
         }
     }
     Info->DestPath = dest;

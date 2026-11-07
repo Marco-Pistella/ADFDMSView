@@ -8,7 +8,7 @@ rem            x64    build the 64 bit DLL  -> .\x64\ADFDMSView.dll
 rem            x86    build the 32 bit DLL  -> .\x86\ADFDMSView.dll
 rem            (none) build both
 rem            noupx  do not compress the DLLs with UPX (by default they are compressed)
-rem            zip    also create ADFDMSView-<version>.zip, with the folders that were built,
+rem            zip    also create ADFDMSView-<version>.zip (for example ADFDMSView-2.3.0.zip), with the folders that were built,
 rem                   ADFDMSView.txt and LICENSE; needs tar.exe (Windows 10 or later)
 rem  UPX is taken from the UPX_EXE variable, the PATH or the MSYS2 folders; if it is
 rem  not found, the MSYS2 package mingw-w64-x86_64-upx is installed with pacman.
@@ -24,13 +24,22 @@ rem  Version: the build stops if the version in adfdmsview.rc (VER_MAJOR ... VER
 rem  the one of Info->Version in GetGlobalInfoW (adfdmsview.c).
 rem ===========================================================================
 setlocal EnableExtensions DisableDelayedExpansion
-cd /d "%~dp0"
+
+rem Everything is taken from the folder of this script, and from nowhere else: the source files are named with
+rem their full path, and the script stops if it cannot make that folder the current one (for example a UNC path).
+set "HERE=%~dp0"
+cd /d "%HERE%"
+if /i not "%CD%\"=="%HERE%" if /i not "%CD%"=="%HERE%" (
+    echo ERROR: cannot change to the folder of build.bat: "%HERE%"
+    echo        Run it from a local or a mapped drive, not from a UNC path.
+    exit /b 1
+)
 
 rem UPX itself reads the environment variable UPX as a list of options: it must not be set
 set "UPX="
 
-set "SRC=adfdmsview.c"
-set "RCFILE=adfdmsview.rc"
+set "SRC=%HERE%adfdmsview.c"
+set "RCFILE=%HERE%adfdmsview.rc"
 set "OUTNAME=ADFDMSView.dll"
 set "SDK=PluginSDK"
 
@@ -70,7 +79,11 @@ if not exist "%RCFILE%" (
     echo ERROR: resource file "%RCFILE%" not found in %CD%
     exit /b 1
 )
-if "%DOZIP%"=="1" if not exist "LICENSE.TXT" (
+rem the license file is LICENSE (or LICENSE.TXT)
+set "LICFILE="
+if exist "LICENSE" set "LICFILE=LICENSE"
+if not defined LICFILE if exist "LICENSE.TXT" set "LICFILE=LICENSE.TXT"
+if "%DOZIP%"=="1" if not defined LICFILE (
     echo ERROR: file LICENSE not found, it is needed by the zip option.
     exit /b 1
 )
@@ -84,6 +97,8 @@ if not exist "%SDK%\plugin.hpp" (
     echo        Put it in .\PluginSDK, or set FARSDK to the folder that contains it.
     exit /b 1
 )
+
+echo Source: %SRC%
 
 rem ---- version: adfdmsview.rc must agree with Info->Version of adfdmsview.c ----------------------
 call :checkver
@@ -223,7 +238,7 @@ exit /b 0
 
 rem ===========================================================================
 rem  :checkver - reads the version of Info->Version (adfdmsview.c) and the one of adfdmsview.rc: they must
-rem  be equal. Sets VERSTR (for example 2.2.2.0). Uses the find.exe of Windows (not the one of MSYS2).
+rem  be equal. Sets VERSTR (major.minor.patch). Uses the find.exe of Windows (not the one of MSYS2).
 rem ===========================================================================
 :checkver
 set "CV="
@@ -234,8 +249,10 @@ set "RCV=%RV_MAJOR%.%RV_MINOR%.%RV_PATCH%.%RV_BUILD%"
 set "RS="
 for /f "tokens=3" %%N in ('%SystemRoot%\System32\find.exe "#define VER_STRING " "%RCFILE%"') do set "RS=%%~N"
 if not "%CV%"=="%RCV%" echo ERROR: version mismatch: %SRC% has %CV%, %RCFILE% has %RCV%. & exit /b 1
-if not "%RS%"=="%RCV%" echo ERROR: VER_STRING in %RCFILE% is "%RS%", expected "%RCV%". & exit /b 1
-set "VERSTR=%CV%"
+rem the version shown (VER_STRING, the name of the zip): major.minor.patch (the build number is shown only if it is not 0)
+set "VERSTR=%RV_MAJOR%.%RV_MINOR%.%RV_PATCH%"
+if not "%RV_BUILD%"=="0" set "VERSTR=%VERSTR%.%RV_BUILD%"
+if not "%RS%"=="%VERSTR%" echo ERROR: VER_STRING in %RCFILE% is "%RS%", expected "%VERSTR%". & exit /b 1
 exit /b 0
 
 
@@ -254,7 +271,7 @@ rem  :mkzip - creates ADFDMSView-<version>.zip with the folders that were built,
 rem ===========================================================================
 :mkzip
 setlocal
-set "ZIPLIST=ADFDMSView.txt LICENSE.TXT"
+set "ZIPLIST=ADFDMSView.txt %LICFILE%"
 if "%WANT64%"=="1" set "ZIPLIST=%ZIPLIST% x64"
 if "%WANT32%"=="1" set "ZIPLIST=%ZIPLIST% x86"
 set "ZIPFILE=ADFDMSView-%VERSTR%.zip"
