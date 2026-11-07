@@ -1,0 +1,224 @@
+.Language=English,English (English)
+
+// ADFDMSView - Far Manager plug-in: language file
+// Copyright (c) 2026 Marco Pistella - MIT License (see the file LICENSE)
+//
+// A message is a line that starts with a double quote. Far numbers the messages from 0 in the order in which they
+// appear and the plug-in asks for them by number: do not add, remove or reorder messages. Every line that does
+// not start with a double quote (like this one) is ignored by Far.
+//
+// To translate: copy this file to ADFDMSView<Language>.lng, change the .Language line to the name of the language as Far
+// shows it (the word before the comma; the one after it is only a description), and translate the text of the
+// messages, in the quotes. Save the file as UTF-8 with BOM, in the folder of ADFDMSView.dll. Restart Far.
+//
+// Placeholders: %u, %d and %ls are replaced by numbers and names; keep them, in the same order and with the same
+// type as in the English text. The comment above a message says what its arguments are. A translated text whose
+// placeholders differ from the English ones is not used: the English text is shown instead.
+// Inside a message do not use double quotes or backslashes, except the \" (an escaped double quote) in the
+// messages that already have it.
+
+// ---- Panel title ----
+
+// MTitleDamaged: added to the panel title when the image or the archive has damage
+"[damaged]"
+
+// ---- Information panel (Ctrl+L): labels ----
+
+// MInfoContainer
+"Container Format"
+
+// MInfoFileSystem
+"File System"
+
+// MInfoCapacity
+"Disk Capacity"
+
+// MInfoBadSectors
+"Bad Sectors"
+
+// MInfoBadTracks
+"Bad Tracks"
+
+// MInfoBadTrackList
+"Bad Track List"
+
+// MInfoRootBlock
+"Root Block"
+
+// MInfoRecovered
+"Recovered"
+
+// MInfoIncomplete
+"Incomplete Files"
+
+// MInfoDmsTracks
+"DMS Tracks"
+
+// MInfoDmsMissing: DMS tracks that are not in the disk image: lost in the archive, or absent from it
+"DMS Tracks Missing"
+
+// MInfoDmsHeaders
+"DMS Headers"
+
+// MInfoDetails
+"Details"
+
+// MInfoDirBlock
+"Dir Block / Items"
+
+// ---- Information panel (Ctrl+L): values ----
+
+// MValContainerDms
+"DMS Compressed"
+
+// MValContainerAdf
+"ADF Image"
+
+// MValFsAmiga: %ls = FFS or OFS
+"Amiga %ls"
+
+// MValFsAmigaCustomBoot: %ls = FFS or OFS; the bootblock is not a standard DOS one (games, demos)
+"Amiga %ls (non-DOS bootblock)"
+
+// MValFsUnknown
+"not recognized"
+
+// MValCapacity: %u = capacity of the disk in KB
+"%u KB"
+
+// MValNoBadTracks: shown in place of the list of bad tracks when there is none
+"None (disk intact)"
+
+// MValRootMissing: the disk has no usable root block: the files are rebuilt from their headers
+"missing: files recovered from headers"
+
+// MValRootBadSum
+"bad checksum (accepted)"
+
+// MValRootValid
+"valid"
+
+// MValRootNoFs
+"no readable DOS file system"
+
+// MValRecovered: %u = files, %u = groups of data blocks, %ls = name of the folder that holds them
+"files: %u, block groups: %u (%ls)"
+
+// MValIncomplete: %u = files that cannot be read completely, %u = files that cannot be read at all
+"%u incomplete, %u unreadable"
+
+// MValDmsTracks: %u = tracks right, %u = tracks repaired, %u = tracks kept but not verified
+"%u OK, %u repaired, %u unverified"
+
+// MValDmsMissing: %u = tracks lost, %u = tracks absent from the archive
+"%u lost, %u absent"
+
+// MValDmsHeaders: %u = track headers that were damaged and repaired
+"%u repaired"
+
+// MValDetails: %ls = name of the report file in the root of the panel
+"see %ls"
+
+// MValDirBlock: %u = block number of the directory, %d = number of items in it
+"Block %u (items: %d)"
+
+// ---- Descriptions of the items of the panel ----
+
+// MDescUnreadable: Description column of the panel (panel mode Descriptions)
+"unreadable"
+
+// MDescIncomplete
+"incomplete (unreadable blocks)"
+
+// MDescSizeFixed
+"size taken from the data blocks"
+
+// MDescRecFile
+"recovered from the header"
+
+// MDescRecData
+"data blocks without a header"
+
+// MDescRecDir
+"files and data not reached by the directory tree"
+
+// MDescImage
+"unpacked disk image"
+
+// MDescReport
+"what was found and repaired"
+
+// ---- Box shown when a file that the plug-in recognizes cannot be opened ----
+// The box shows the name of the file and, under it, one of these texts.
+
+// MErrDiskType: the DMS archive holds files, not a disk image (disk type 7 in its header)
+"This archive does not hold a disk image (disk type 7)"
+
+// MErrEncrypted
+"This DMS archive is encrypted"
+
+// MErrNoDisk: a DMS archive in which no disk track can be found
+"No disk that can be read was found in this file"
+
+// MErrRead
+"The file cannot be read, or its size is not valid"
+
+// MErrMemory
+"Not enough memory to open the file"
+
+// ---- Box shown when something would change the image (the panel is read-only) ----
+// F5 or F6 into the panel, F6 out of it (a move), F7, F8, Del, saving a file edited with F4.
+
+// MReadOnly
+"This panel is read-only: the image cannot be changed"
+
+// ---- The copy dialog (F5) and the boxes that go with it ----
+// "&" marks the key of a button; \" is a double quote.
+
+// MCopyTitle: title of the copy dialog (F5)
+"Copy"
+
+// MCopyOne: the line above the field of the folder, for one item: %ls is its name
+"Copy \"%ls\" to:"
+
+// MCopyMany: the same for several items: %u is how many
+"Copy %u items to:"
+
+// MCopyExisting: label of the list of what to do with the files that exist
+"Already existing files:"
+
+// MCopyAsk: first choice of that list: a box asks for every file that exists
+"Ask"
+
+// MCopyOverwrite: second choice of the list
+"Overwrite"
+
+// MCopySkip: third choice of the list
+"Skip"
+
+// MBtnCopy: button that starts the copy ("&" marks its key)
+"&Copy"
+
+// MBtnCancel: button that closes the dialog or the box without copying
+"Cancel"
+
+// MExists: the box about a file that exists: this line, then the path of the file, then five buttons
+"File already exists:"
+
+// MBtnOverwrite: button of that box
+"&Overwrite"
+
+// MBtnSkip: button of that box
+"&Skip"
+
+// MBtnOverwriteAll: button of that box: from now on overwrite
+"Overwrite &all"
+
+// MBtnSkipAll: button of that box: from now on skip
+"S&kip all"
+
+// MErrDest: box shown when the folder typed in the dialog cannot be made: this line, then the folder
+"Cannot create the destination folder:"
+
+// MCopyFailed: box shown at the end when some items could not be copied: %u is how many
+"Items that could not be copied: %u"
