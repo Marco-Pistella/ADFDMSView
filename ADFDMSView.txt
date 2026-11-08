@@ -16,6 +16,7 @@ CONTENTS
   8. Languages
   9. Building from source
  10. License
+ 11. Sources and latest version
 
 
 1. WHAT IT DOES
@@ -413,3 +414,13 @@ part of the plug-in and are covered by the same license.
 The plug-in is provided "as is", without warranty of any kind (see LICENSE). It never writes to the
 images and archives that it opens, but what it recovers from damaged material may be incomplete:
 check _RECOVERY_REPORT.txt and keep a copy of anything that matters.
+
+
+11. SOURCES AND LATEST VERSION
+----------------------------------------------------------------------------------------------------
+
+The source code of ADFDMSView and its latest version are available at:
+
+    https://github.com/Marco-Pistella/ADFDMSView
+
+To build the plug-in from the sources, see section 9.
