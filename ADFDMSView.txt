@@ -287,13 +287,14 @@ right one:
   - If the track unpacked as it is still ends where the packed data end (the damage is in the bits
     of literals and does not put the stream out of step) the checksum cannot choose among many
     candidates: only bursts of up to 4 wrong bits are tried.
-  - No compression and simple accept any data and their checksum alone is a weak validation criterion: all the
-    candidates are tried, and a correction is accepted only if it is the only one that fits.
+  - No compression and simple accept any data and their checksum alone is a weak validation
+    criterion: all the candidates are tried, and a correction is accepted only if it is the only one
+    that fits.
   - A class that exceeds the per-track candidate-decode limit (DMS_BITS_TRIALS) is skipped. A
-    correction found in a later class has not been compared with the candidates
-    of the class that was skipped, which flip fewer bits: it is taken, but the track is shown as
-    not verified and the report says so. (In no compression and simple a skipped class means that
-    no correction is taken: it could not be shown that the correction is the only one that fits.)
+    correction found in a later class has not been compared with the candidates of the class that
+    was skipped, which flip fewer bits: it is taken, but the track is shown as not verified and the
+    report says so. (In no compression and simple a skipped class means that no correction is taken:
+    it could not be shown that the correction is the only one that fits.)
 
 More damage than this (three wrong bytes, a damaged sector) is not repaired: with so many possible
 corrections, one that fits the CRC and the checksum could well be a wrong one. The track is then
@@ -306,13 +307,13 @@ track holds random data (data that were already compressed, for example) and the
 any value, about one repair in twenty is wrong. The report names the byte that was replaced, so
 that a repair can be checked.
 
-The repair search is bounded by 6 seconds of repair work and 400,000 candidate decodes per
-archive (DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET in the source). Only repair work counts toward
-this time: key search and ordinary track decoding do not use it. The search for wrong bits is limited
-to 40,000 candidate decodes and one second per track (DMS_BITS_TRIALS and DMS_BITS_SECONDS), and
-can use at most half of the archive-wide repair time and decode budget. This leaves resources for
-repairs that require only one byte to be corrected. A class that exceeds the per-track limit is
-skipped (see above). The report identifies searches stopped by a limit or classes that were skipped.
+The repair search is bounded by 6 seconds of repair work and 400,000 candidate decodes per archive
+(DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET in the source). Only repair work counts toward this time:
+key search and ordinary track decoding do not use it. The search for wrong bits is limited to 40,000
+candidate decodes and one second per track (DMS_BITS_TRIALS and DMS_BITS_SECONDS), and can use at
+most half of the archive-wide repair time and decode budget. This leaves resources for repairs that
+require only one byte to be corrected. A class that exceeds the per-track limit is skipped (see
+above). The report identifies searches stopped by a limit or classes that were skipped.
 
 Encrypted archives. A DMS archive can be encrypted with a password. The plug-in does not ask for
 it: the data of an encrypted archive are decrypted with a key that runs through the packed data of
@@ -488,8 +489,8 @@ What is not translated
 ----------------------------------------------------------------------------------------------------
 
 The plug-in is a single C file, adfdmsview.c, plus the version resource adfdmsview.rc. Run build.bat
-from the Windows Command Prompt; it changes to its own folder, so the caller's current directory does
-not matter. The script builds the 32-bit and 64-bit DLLs with the MSYS2 GCC toolchains.
+from the Windows Command Prompt; it changes to its own folder, so the caller's current directory
+does not matter. The script builds the 32-bit and 64-bit DLLs with the MSYS2 GCC toolchains.
 
 Commands
 
@@ -533,9 +534,10 @@ C compilers
     the requested environments has them, the script lists the GCC packages it knows for that target
     and asks which one to install with pacman. Choose 0 to skip that DLL. After installation it
     checks for the compiler and resource compiler again.
-  - ENV64 and ENV32 can change the environments to try, in order. By default ENV64=mingw64,
-    so UCRT64 is never selected implicitly. Set ENV64=ucrt64 to force it, or ENV64="mingw64 ucrt64"
-    to allow it as a fallback after MINGW64. For x86, use ENV32=mingw32. These names are target-specific.
+  - ENV64 and ENV32 can change the environments to try, in order. By default ENV64=mingw64, so
+    UCRT64 is never selected implicitly. Set ENV64=ucrt64 to force it, or ENV64="mingw64 ucrt64" to
+    allow it as a fallback after MINGW64. For x86, use ENV32=mingw32. These names are
+    target-specific.
 
 Far Manager SDK header (plugin.hpp)
 
@@ -552,10 +554,11 @@ Far Manager SDK header (plugin.hpp)
 
 UPX compression
 
-  - By default the script searches UPX_EXE, PATH and the MSYS2 folders. If UPX is
-    missing, it tries to install the native MSYS2 UPX package with pacman. This host-tool package
-    selection is independent of the GCC environment used to build the DLL. If UPX cannot be installed, the DLL is still built
-    unpacked and a warning is shown. Use noupx to skip the search and installation entirely.
+  - By default the script searches UPX_EXE, PATH and the MSYS2 folders. If UPX is missing, it tries
+    to install the native MSYS2 UPX package with pacman. This host-tool package selection is
+    independent of the GCC environment used to build the DLL. If UPX cannot be installed, the DLL is
+    still built unpacked and a warning is shown. Use noupx to skip the search and installation
+    entirely.
   - Normal compression uses --best --lzma. When packing succeeds, the build log reports the DLL
     size before and after UPX. If UPX fails, the saved unpacked DLL is restored and a warning is
     shown. With max, UPX is run with --best --ultra-brute --lzma; this tries more variants and can
@@ -595,6 +598,7 @@ it. Some antivirus programs are suspicious of UPX-packed files; use noupx for a 
 The engine alone (the DMS unpacker and the ADF reader, without Win32 and Far headers) can be built
 with gcc -DADF_CORE_ONLY ... .
 
+
 10. LICENSE
 ----------------------------------------------------------------------------------------------------
 
@@ -602,8 +606,8 @@ ADFDMSView is free software, released under the MIT License.
 Copyright (c) 2026 Marco Pistella.
 
 The full text of the license is in the file LICENSE, which is distributed together with the plug-in
-and must be kept in every copy or substantial portion of it. The language files (ADFDMSView*.lng) are
-part of the plug-in and are covered by the same license.
+and must be kept in every copy or substantial portion of it. The language files (ADFDMSView*.lng)
+are part of the plug-in and are covered by the same license.
 
 The plug-in is provided "as is", without warranty of any kind (see LICENSE). It never writes to the
 images and archives that it opens, but what it recovers from damaged material may be incomplete:

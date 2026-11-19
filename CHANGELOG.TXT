@@ -1,0 +1,282 @@
+ADFDMSView - CHANGELOG
+====================================================================================================
+
+The changes of each version are listed against the previous version, in three groups: features,
+fixes, and language file, build script and documentation. The most recent version comes first.
+
+
+Version 2.4.3 (changes from version 2.4.2)
+====================================================================================================
+
+Version 2.4.3 makes the plug-in stop showing as verified what it did not verify. The data are still
+used whenever possible (it is a recovery plug-in: nothing is thrown away), except a block that
+belongs to another file, but the file or the track is now shown as incomplete or not verified, the
+copy says how many items were copied that way, and the report says what was found. The search for
+IFF pictures in the blocks that no file uses, and the item _UNREFERENCED_BLOCKS.RAW that went with
+it, are removed.
+
+FEATURES
+----------------------------------------------------------------------------------------------------
+
+  - New: the box at the end of a copy (F5) says how many items were copied incomplete or unverified,
+    together with the items that could not be copied (new message MCopyPartial).
+  - Changed: a file that was used although a check failed is flagged in its Description ("incomplete
+    or unverified blocks"), and the line "Incomplete Files" of the information panel now counts the
+    files that are incomplete or not verified.
+  - Changed: the line of the report that counts the DMS tracks says how many of them were not
+    verified or had errors and were kept as decoded.
+  - Removed: the item _UNREFERENCED_BLOCKS.RAW (a copy of the disk in which the blocks that the file
+    system uses are zero, offered when the blocks that no file uses hold data) and the search for
+    IFF pictures behind it. Its description, its line in the report and the map of the blocks that
+    are in use (one byte for each block of the image), which only this item needed, are gone, and so
+    are the lines about it in README.md and the section "Blocks that no file uses" of
+    ADFDMSView.txt. _RECOVERED (files and data blocks that the directory tree does not reach) is not
+    affected.
+
+
+FIXES
+----------------------------------------------------------------------------------------------------
+
+  - OFS: a data block that belongs to another file or position was returned as good and copied into
+    the file. It is no longer used: its place stays zero, unless the index of the OFS data blocks
+    holds the right block (found by header key and sequence number). The file is shown as incomplete
+    or unverified and the report names the block.
+  - OFS: the checksum of the data blocks was not checked (only the index of a disk without file
+    headers discarded such blocks). Every data block is now graded: right (verified), right but too
+    short, checksum wrong, header damaged, or unusable. The block of the block table and the block
+    of the index are compared and the better one is used. A block whose checksum is wrong is still
+    used as it is (a recovery plug-in keeps the data), but the file is shown as incomplete or
+    unverified.
+  - OFS: a block that holds fewer bytes than the file needs there was counted as complete. The bytes
+    that it has are used, the rest is zero, and the file is shown as incomplete or unverified (a
+    replacement is looked for first).
+  - OFS: duplicates in the index of the data blocks were resolved in two different ways (the search
+    of a block took the lowest block number, the rebuild of the files without a header took the last
+    one). One rule is now used for both: the block with a right checksum, else the one with the
+    lowest block number; the others are left out and the report says how many. For files rebuilt
+    without a header this can give a different result from 2.4.2 when two blocks claim the same
+    place.
+  - ADF: the checksum of file headers, extension blocks and directory headers was checked only by
+    the recovery scans. A file header or an extension block with a wrong checksum is now reported
+    and the file is shown as incomplete or unverified; a directory header with a wrong checksum is
+    reported and counted as a damaged block. The data are used in every case.
+  - ADF: when the memory ran out while an image was being opened, the memory already allocated was
+    not freed. It is now freed.
+  - DMS: a key of an encrypted archive that fits only weakly (the checksum of the first track is
+    right but the unpacked data do not end where the packed data end) was shown as right. It is
+    still used when no other key fits, but the track is now shown as not verified and the report
+    says that the key is not verified.
+  - DMS: a correction of wrong bits found after a class of candidates with fewer wrong bits had been
+    skipped (because it was too large for the limit of a track) was shown as repaired. It is still
+    taken, but the track is now shown as not verified and the report says that a class was not
+    tried. In no compression and simple, where the checksum is a weak check, a skipped class still
+    means that no correction is taken. The closing message of the report now tells the limit of the
+    archive ("stopped by the limit of the archive") from a class that was too large for the limit of
+    a track ("did not try every candidate"); it said "stopped" when a class had only been skipped.
+  - DMS: the time limit of the repairs (DMS_REPAIR_SECONDS, 6 seconds) also counted the search for
+    the key of an encrypted archive, so a long key search could use up the time of the repairs; the
+    manual said the opposite. The repairs now have a clock of their own that runs only while a
+    repair is being searched, and so has the limit of the search of wrong bits, which is half of it.
+    The search for the key (up to DMS_KEY_SECONDS) and the unpacking of the other tracks do not use
+    that time.
+  - F5: if the copy dialog could not be shown, the existing files were overwritten without asking. A
+    box now says that the dialog cannot be shown and nothing is copied; the mode of a copy never
+    starts as "overwrite" any more.
+  - F5: a file copied incomplete was counted as a copy that went well. It is now counted apart, and
+    the box at the end of the copy shows the count (see the features above).
+  - F5: a file whose write failed stayed in the destination. It is now deleted.
+
+
+LANGUAGE FILE, BUILD AND DOCUMENTATION
+----------------------------------------------------------------------------------------------------
+
+  - Language file: the English file has 67 messages (66 in 2.4.2). The last message of 2.4.2,
+    MDescUnref, is replaced by MCopyPartial ("Items copied incomplete or unverified: %u"),
+    MErrDialog ("The copy dialog cannot be shown: nothing was copied.") is added after it, and
+    MDescIncomplete has a new text ("incomplete or unverified blocks"). A language file made for
+    2.4.2 has to be brought up to date: it has one message too few (Far reports a bad language file
+    when the plug-in asks for a message that is not there), and a translation of MDescUnref in the
+    place of MCopyPartial is not used, because its placeholders differ (the English text is shown).
+  - Build script: rewritten to make a first build easier for users who have not installed MSYS2 or
+    used pacman before (the compiler and linker flags, including the x86 --kill-at and DllMain
+    entry-point options, are unchanged):
+      - MSYS2: it searches the usual folders and the registered installation path. If it is not
+        found, it offers an unattended download and installation on 64-bit Windows 10 version 1809
+        (build 17763) or later, when curl.exe is available and the destination folder is missing or
+        empty. Nothing is installed unless the user chooses 1; choosing 0 leaves the system
+        unchanged and prints the official download page. A newly installed MSYS2 is initialized and
+        updated with pacman.
+      - Compilers: gcc.exe and windres.exe are checked for each target. MINGW64 is the default and
+        the only automatically searched x64 environment, because it produces substantially smaller
+        DLLs for this plug-in; UCRT64 is offered only as an explicit choice in the installation menu
+        (or with ENV64). MINGW32 is used for x86. MINGW64 is being phased out by MSYS2, and MINGW32
+        is a legacy 32-bit environment with gradually reduced package availability. If no compatible
+        compiler is present, the script offers the GCC packages it knows for that target and lets
+        the user choose which one pacman installs, or skip that DLL.
+      - Far SDK: it searches the project folder, FARSDK, PluginSDK and an installed Far Manager. If
+        the header is still missing and FARSDK was not explicitly set, plugin.hpp is downloaded from
+        the official Far Manager repository into PluginSDK.
+      - UPX: it searches UPX_EXE, PATH and the MSYS2 folders, preferring MINGW64, and tries to
+        install the native package mingw-w64-x86_64-upx with pacman if it is absent. Failure to find
+        or install UPX no longer prevents the DLL from being built: it remains unpacked. A temporary
+        copy restores the unpacked DLL if UPX fails, and the sizes before and after packing are
+        printed. The new option max adds --ultra-brute to the normal --best --lzma packing options.
+      - Packaging: the zip option now includes README.md as well as ADFDMSView.txt, CHANGELOG.TXT,
+        LICENSE (or LICENSE.TXT) and the output folders, and checks for tar.exe before creating the
+        archive.
+      - Each stage (resource compilation, GCC linking, export check, UPX packing, copy of the
+        language files) prints its own progress message, so that the stage that fails is visible in
+        the console.
+  - Documentation: README.md and ADFDMSView.txt describe the new behavior, say plainly that
+    "repaired" is not a mathematical guarantee (what is not completely verified is shown as "not
+    verified"), and no longer mention the removed item. README.md and section 9 of ADFDMSView.txt
+    describe the build options, the automatic MSYS2 installation, the compiler choices, the SDK
+    download, the UPX behavior and the environment variables. README.md, ADFDMSView.txt and the
+    comments of the source describe the current behavior and implementation only.
+
+
+Version 2.4.2 (changes from version 2.4.1)
+====================================================================================================
+
+Version 2.4.2 adds the repair of a burst of wrong bits and of two wrong bits in the packed data of a
+DMS track, the repair of a byte lost or added in the last track, and a more careful handling of
+encrypted archives.
+
+FEATURES
+----------------------------------------------------------------------------------------------------
+
+  - New: repair of a burst of up to 16 wrong bits and of two wrong bits in the packed data of a DMS
+    track (2.4.1 did not repair them, because with a 16-bit checksum the first candidate that passed
+    both checks was very often a wrong one). The candidates are solved from the CRC, and rules keep
+    a wrong correction from passing for a right one. The checksum is a sum of bytes: the changes of
+    two literals can cancel, and a copy of the same bytes from another place gives the same sum, so
+    more than one candidate can pass it. Therefore:
+      - the candidates are tried in classes, the ones that flip the fewest bits first: bursts of 2
+        to 8 wrong bits, pairs of wrong bits more than 15 bits apart, bursts of 9 to 16 bits;
+      - a class gives a correction only if exactly one of its candidates passes; in no compression
+        and simple, which accept any stream, a correction is taken only if it is the only one of all
+        the candidates that passes;
+      - in the modes that keep a dictionary (QUICK, MEDIUM, DEEP, HEAVY) a candidate also has to
+        make the unpacked data end where the packed data end (at most DMS_TAIL_BITS = 128 bits
+        before their end, as in the search for the key): a stream that has gone out of step does
+        not;
+      - if the track unpacked as it is still ends where the packed data end (the damage is in the
+        bits of literals and does not put the stream out of step), the checksum cannot choose among
+        many candidates: only bursts of up to DMS_QUIET_WEIGHT = 4 wrong bits are tried;
+      - a class of candidates that does not fit in the candidate decodes left for the track is
+        skipped;
+      - bursts that start in the last 15 bits of the packed data are tried too.
+  - New: the search of wrong bits is bounded for every track by DMS_BITS_TRIALS (40,000 candidate
+    decodes) and DMS_BITS_SECONDS (1 second), and for the archive by half of the time and of the
+    candidate decodes of the repairs, so that a track that cannot be repaired does not take all of
+    them; the repairs of one byte keep the other half. The report has a new line when a limit
+    stopped the search.
+  - New: repair of a byte lost or added in the last track. There is no next header to give the
+    length of its data, so the end of the file does: a file that ends one byte before the declared
+    end is repaired as a byte lost (also when the byte lost is the last one of the file), a file
+    that ends one byte after it is repaired as a byte added, and if that does not give a repair the
+    track is tried as a track of the declared length with one stray byte after the data. The note
+    "the file ends N bytes early" is not written for a track that was repaired. (2.4.1 read a file
+    one byte short as truncated and a file one byte long as a track of the declared length, and did
+    not repair the byte.)
+  - New: encrypted archives in no compression and simple. A key changes only the first 20 bytes or
+    so of the first track, so in these modes, which accept any stream, a wrong key can have the
+    right checksum. The search now counts the keys that fit: if only one gives a boot block that
+    names its root block (880 or 1760) it is taken, and if only one fits it is taken; otherwise the
+    first one is taken, the track is shown as not verified and the report says that its first bytes
+    are not certain.
+  - New: a HEAVY track whose checksum is wrong after one of the two tolerances of the decoder (a
+    last match that goes past the end of the track, an incomplete table of distances) is read again
+    the other way: the last match completed past the end of the track, and the incomplete table read
+    as a Huffman code in which what is not assigned is symbol 0. The reading whose checksum is right
+    is the one taken. The CRC-16 is now computed eight bytes at a time instead of one.
+  - Changed: the budget of candidate decodes for the repairs of an archive (DMS_REPAIR_BUDGET) is
+    raised from 150,000 to 400,000, so that the repairs of bits fit in it; DMS_REPAIR_SECONDS stays
+    at 6 seconds.
+  - Changed: the line of the report about the blocks that no file uses says "(a graphic IFF FORM is
+    among them)" when an IFF FORM is among them, also when its header crosses the end of a block.
+
+
+FIXES
+----------------------------------------------------------------------------------------------------
+
+  - DMS: the length of the packed data of a track was taken from the next valid header, further on,
+    when the header at the declared end could not be repaired, so a track with damaged data next to
+    a damaged header was not repaired. The length that the track declares is now trusted whenever
+    the next valid header is more than one byte further on; the damaged header is reported and
+    skipped when the following track is read.
+  - DMS: in an encrypted archive the key ran through the declared length of the packed data only, so
+    with a byte added in a track the track was repaired but the key was lost for the tracks after
+    it. The key now runs through all the bytes that belong to the track and through repaired data.
+  - DMS: an encrypted archive that could not be decrypted was refused only if nothing could be
+    stored, so the tracks decoded with a wrong key were kept as noise. It is now refused (the box
+    says that the decryption key was not found) when no track could be verified. When the time limit
+    stopped the search for the key, the archive is shown as damaged and the report says why.
+
+
+LANGUAGE FILE, BUILD AND DOCUMENTATION
+----------------------------------------------------------------------------------------------------
+
+  - Language file: unchanged (66 messages); the language files made for 2.4.1 remain valid.
+  - New constants at the top of the DMS engine: DMS_BITS_TRIALS, DMS_BITS_SECONDS, DMS_QUIET_WEIGHT
+    and DMS_TAIL_BITS (the last one is also the end test of the search for the key).
+  - Documentation: README.md and ADFDMSView.txt describe the new behavior: the repairs of bits, the
+    last track, the encrypted archives, the limits and the unreferenced blocks.
+
+
+Version 2.4.1 (changes from version 2.4.0)
+====================================================================================================
+
+Version 2.4.1 refines the DMS engine of 2.4.0: a track that unpacks right as it is is no longer
+reported as repaired, and a track with damaged data is repaired also when the header of the next
+track is damaged too, if that header can be repaired. On ADF disks the blocks of the directory cache
+are recognized as part of the file system.
+
+FEATURES
+----------------------------------------------------------------------------------------------------
+
+  - Changed: the item _UNREFERENCED_BLOCKS.RAW is offered when some of the blocks that no file uses
+    hold data (they are not all made of one repeated byte), not only when they hold an IFF picture
+    or animation, so the deleted files of any other kind (texts, programs, sounds) can be searched
+    in it. The item is the same as before: a file of the size of the disk in which the blocks that
+    the file system uses are zero and the others are as they are on the disk; it is shown only for a
+    disk with a DOS bootblock that is read without errors; its Description is the same ("blocks that
+    no file uses"). The line of the report says that the blocks "are not referenced by the file
+    system and some of them hold data".
+  - Changed: an archive whose search for the key was stopped by the time limit (DMS_KEY_SECONDS) is
+    marked as damaged ("[damaged]" in the title, and a line in the report).
+
+
+FIXES
+----------------------------------------------------------------------------------------------------
+
+  - DMS: a track whose CRC of the packed data is wrong is now first unpacked as it is. If the
+    checksum of the unpacked track is then right (the damage is in bytes, or bits, that the decoder
+    does not need), the track is kept as right: it is not reported as "repaired", it does not mark
+    the archive as damaged, and nothing is searched. Only when the checksum is wrong does the search
+    for a repair start, and if it finds nothing the track is kept as it was unpacked (best effort),
+    as in 2.4.0. In 2.4.0 the search came first: it spent candidate decodes on a track that did not
+    need them, and could report a repair for a track that was right.
+  - DMS: the length of the packed data that a track header declares is now trusted when the header
+    of the next track is damaged but can be repaired at the place where the data should end. In
+    2.4.0 the end of the data was taken from the next valid header, further on, the length did not
+    fit any model of damage, and a track with one wrong byte was not repaired only because the
+    header of the track after it was damaged too. Now the data are repaired; the damaged header is
+    repaired when the next track is read, as before.
+  - ADF: the blocks of the directory cache of the DC-OFS and DC-FFS disks (a bootblock with the flag
+    of the directory cache: DOS\4 to DOS\7) belong to the file system. They are now reached from the
+    directory headers and are no longer counted among the blocks that no file uses.
+
+
+LANGUAGE FILE, BUILD AND DOCUMENTATION
+----------------------------------------------------------------------------------------------------
+
+  - Language file: no message was added, changed or moved; ADFDMSViewEng.lng and the language files
+    made for 2.4.0 are valid for 2.4.1 as they are.
+  - build.bat: the zip option checks that CHANGELOG.TXT exists before it builds, and says so if it
+    does not (as it already did for LICENSE).
+  - Documentation: ADFDMSView.txt (section 5) explains that in the modes that accept any data (no
+    compression, simple) the checksum is a weaker test: a wrong byte of any value can be replaced by
+    another byte that gives the same sum. The behavior of that repair is unchanged. README.md and
+    ADFDMSView.txt describe the new behavior: the order in which a track with a wrong CRC is tried,
+    the directory cache and _UNREFERENCED_BLOCKS.RAW.
