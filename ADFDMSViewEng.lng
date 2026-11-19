@@ -127,8 +127,8 @@
 // MDescUnreadable: Description column of the panel (panel mode Descriptions)
 "unreadable"
 
-// MDescIncomplete
-"incomplete (unreadable blocks)"
+// MDescIncomplete: Description of a file whose data could not be read completely or could not be verified
+"incomplete or unverified blocks"
 
 // MDescSizeFixed
 "size taken from the data blocks"
@@ -154,8 +154,8 @@
 // MErrDiskType: the DMS archive holds files, not a disk image (disk type 7 in its header)
 "This archive does not hold a disk image (disk type 7)"
 
-// MErrEncrypted
-"This DMS archive is encrypted"
+// MErrEncrypted: an encrypted DMS archive whose decryption key was not found and from which no track could be decoded
+"This DMS archive is encrypted and its decryption key was not found"
 
 // MErrNoDisk: a DMS archive in which no disk track can be found
 "No disk that can be read was found in this file"
@@ -222,3 +222,17 @@
 
 // MCopyFailed: box shown at the end when some items could not be copied: %u is how many
 "Items that could not be copied: %u"
+
+// ---- More texts of the information panel, of the panel items and of the copy ----
+
+// MValContainerDmsEnc: Container Format of an encrypted DMS archive
+"DMS Compressed, encrypted"
+
+// MValRootMissingData: the disk has neither a usable root block nor file headers: the files are rebuilt from the data blocks
+"missing: files rebuilt from data blocks"
+
+// MCopyPartial: box shown at the end when some items were copied incomplete or unverified: %u is how many
+"Items copied incomplete or unverified: %u"
+
+// MErrDialog: box shown when the copy dialog cannot be shown: nothing was copied
+"The copy dialog cannot be shown: nothing was copied."

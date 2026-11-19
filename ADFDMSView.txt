@@ -1,5 +1,5 @@
 ADFDMSView
-Far Manager 3 plug-in (32 and 64-bit), version 2.3.0
+Far Manager 3 plug-in (32 and 64-bit), version 2.4.3
 Author: Marco Pistella
 License: MIT (see section 10)
 ====================================================================================================
@@ -16,7 +16,7 @@ CONTENTS
   8. Languages
   9. Building from source
  10. License
- 11. Sources and latest version
+ 11. Source code
 
 
 1. WHAT IT DOES
@@ -59,8 +59,8 @@ The plug-in is read-only: nothing is ever written to the image or to the archive
   - Far offers a file to the plug-in by its extension: any .adf file is opened; a .dms file
     is opened if its content looks like a DMS archive (the check also accepts an archive whose
     signature or first track header is damaged).
-  - If the plug-in recognizes a file but cannot open it (an encrypted archive, ...), a box says
-    why (section 3) and Far does nothing else with the file.
+  - If the plug-in recognizes a file but cannot open it (an archive that does not hold a disk
+    image, ...), a box says why (section 3) and Far does nothing else with the file.
 
 
 3. SUPPORTED FORMATS
@@ -84,12 +84,14 @@ DMS disk archives (.dms)
     bytes.
   - The archive is unpacked in memory into a disk image, which is then read like any ADF.
   - An archive whose signature or first track header is damaged is still recognized and read.
+  - Encrypted archives (a password was set when they were made) are opened: the plug-in does not
+    ask for the password, it finds the key itself (section 5).
 
 Not opened (a box says why, and Far does nothing else with the file):
 
-  - encrypted DMS archives;
   - DMS archives that do not hold a disk image (disk type 7);
-  - DMS archives in which no disk track can be found;
+  - DMS archives in which no disk track can be found, and encrypted DMS archives whose key is not
+    found and from which nothing can be decoded;
   - files that cannot be read, shorter than 56 bytes or larger than 512 MiB;
   - a file for which there is not enough memory.
 
@@ -107,16 +109,22 @@ Browsing and copying
   - F5 copies the selected items. A selected directory is copied with all its subdirectories.
     A dialog like the copy dialog of Far asks where to copy: the folder of the other panel is
     proposed; a relative path is taken from it, a folder that does not exist is made, and the
-    history of the field is kept (Ctrl+Down opens it).
+    previously entered destination paths can be recalled with Ctrl+Down.
   - "Already existing files" says what to do with a file that is already at the destination: Ask
     (a box for every such file, with Overwrite, Skip, Overwrite all, Skip all and Cancel),
     Overwrite, or Skip. The choice is proposed again until Far is closed. Cancel in the dialog, or
-    in the box, copies nothing more.
+    in the box, copies nothing more. If the dialog itself cannot be shown (not enough memory), a
+    box says so and nothing is copied.
   - F3 (view) and F4 (edit) copy the file to a temporary folder without a dialog.
   - A file that cannot be read completely is still copied: the blocks that cannot be read are
-    replaced by zeros (the Description column says "incomplete"). A file of which nothing can be
-    read is not copied, and neither is an item whose destination path would be longer than 259
-    characters: at the end a box tells how many items could not be copied.
+    replaced by zeros (the Description column says "incomplete or unverified blocks"). The same is
+    said of a file in which a block was used although a check failed (a data block with a wrong
+    checksum, a damaged header of the file). A block that belongs to another file, or to another
+    place of the same file, is never copied into a file. A file of which nothing can be read is not
+    copied, and neither is an item whose destination path would be longer than 259 characters; a
+    file whose copy was cut short (the disk of the destination is full, for example) is deleted
+    again. At the end a box tells how many items were copied incomplete or unverified and how many
+    could not be copied.
   - The copies keep the date and time of the Amiga files and directories (the last modification
     date of the header block of the item): the date is set as the creation and last write time
     of the copy. A directory gets its date after its contents have been copied. The Amiga has no
@@ -152,13 +160,13 @@ Names
 
 Special items in the root of the panel
 
-  <name>.adf             Only for DMS archives: the disk image unpacked from the archive.
-                         Copy it (F5) to get an ordinary ADF file for an emulator.
-  _RECOVERED             Only if something was recovered: the files and data blocks that the
-                         directory tree does not reach (see section 6).
-  _RECOVERY_REPORT.txt   Only if damage was found: a text that lists what the readers found and
-                         repaired, one line per finding. Lines that start with "ERROR:" are
-                         problems, lines that start with "note:" are repairs and other remarks.
+  <name>.adf                 Only for DMS archives: the disk image unpacked from the archive.
+                             Copy it (F5) to get an ordinary ADF file for an emulator.
+  _RECOVERED                 Only if something was recovered: the files and data blocks that the
+                             directory tree does not reach (see section 6).
+  _RECOVERY_REPORT.txt       Only if damage was found: a text that lists what the readers found and
+                             repaired, one line per finding. Lines that start with "ERROR:" are
+                             problems, lines that start with "note:" are repairs and other remarks.
 
 Description column
 
@@ -166,7 +174,8 @@ Description column
   about an item:
 
     unreadable                                  nothing of the file can be read
-    incomplete (unreadable blocks)              some blocks of the file cannot be read
+    incomplete or unverified blocks             some blocks of the file cannot be read, or were
+                                                used although a check failed
     size taken from the data blocks             the size field of the file was wrong
     recovered from the header                   a file of _RECOVERED
     data blocks without a header                a file of _RECOVERED made of orphan data blocks
@@ -182,16 +191,17 @@ Panel title
 
 Information panel (Ctrl+L on the other panel)
 
-  Container Format     ADF image, or DMS compressed.
+  Container Format     ADF image, or DMS compressed (also "encrypted").
   File System          Amiga OFS or FFS (and whether the bootblock is not a standard DOS one).
   Disk Capacity        Size of the disk image in KB.
   Bad Sectors          Number of damaged blocks found while reading the file system.
   Bad Tracks           Number of damaged tracks (cylinders).
   Bad Track List       The numbers of those tracks (or "None (disk intact)").
-  Root Block           valid / bad checksum (accepted) / missing (files recovered from headers) /
-                       no readable DOS file system.
+  Root Block           valid / bad checksum (accepted) / missing (files recovered from headers, or
+                       rebuilt from data blocks) / no readable DOS file system.
   Recovered            Files and groups of data blocks found outside the directory tree.
-  Incomplete Files     Files that cannot be read completely, and files that cannot be read at all.
+  Incomplete Files     Files that cannot be read completely or could not be verified, and files that
+                       cannot be read at all.
   DMS Tracks           Tracks right, repaired, and not verified.
   DMS Tracks Missing   Tracks lost and tracks absent from the archive.
   DMS Headers          Track headers that were damaged and repaired.
@@ -215,15 +225,22 @@ Verification. Every track is checked twice: the CRC-16 of its packed data and th
 the unpacked track must be those written in the track header. The state of each track of the disk
 is known:
 
-    right          CRC and checksum are right.
+    right          CRC and checksum are right (or the checksum alone, when the packed data are
+                   damaged only in bytes that the decoder does not use).
     repaired       The header or the packed data were damaged and were repaired. After the
                    repair CRC and checksum are right.
     not verified   The packed data are intact (CRC) but the checksum of the track is not the
-                   expected one. The track is kept.
-    best effort    The data are damaged and could not be repaired. What was unpacked is kept: the
-                   part before the damage is right. Tracks that copy from such a track are kept
-                   the same way.
-    lost           The track is in the archive but could not be recovered. It is written as zeros.
+                   expected one. The track is kept. Also a track that depends on something that
+                   is not completely verified: the first track of an encrypted archive when more
+                   than one key fits it (the first bytes of the track are not certain) or when
+                   the key fits only weakly (see Encrypted archives), and a track repaired by a
+                   correction of bits that was found after a class of candidates was skipped (see
+                   Packed data).
+    best effort    The data are damaged and could not be repaired. What could be unpacked is kept:
+                   the part before the damage is right, what could not be unpacked is zero.
+                   Tracks that copy from such a track are kept the same way.
+    lost           The track is in the archive but nothing could be recovered from it. It is
+                   written as zeros.
     absent         The track is not in the archive. It is written as zeros.
 
 A disk of 80 cylinders (DD or HD) is always written at its full size; missing tracks are zeros.
@@ -235,28 +252,111 @@ repaired, so that the track, and the tracks that depend on it, are not lost. The
 recognized when its "DMS!" signature or its first track header is damaged. When a header cannot be
 repaired, the plug-in looks for the next valid track header and goes on from there.
 
-Packed data. When the CRC of a track is wrong, the plug-in looks for what damaged the data and
-accepts a repair only if the checksum of the unpacked track is then right. It repairs:
+Packed data. When the CRC of a track is wrong, the track is first unpacked as it is: if the
+checksum of the unpacked track is right (the damage is in bytes that the decoder does not use),
+the track is kept as right and nothing is searched. If it is not, the plug-in looks for what
+damaged the data. The length of the data, between the track header and the next valid track
+header, says which kind of damage to look for, and a repair is accepted only if the CRC of the
+packed data and the checksum of the unpacked track are then both right. It repairs:
 
-  - a burst of damage of up to 16 bits (one bit, one byte, two adjacent bytes, ...);
-  - two flipped bits anywhere in the track;
-  - one byte that was lost inside the track data;
-  - one byte that was added inside the track data.
+  - one byte that was lost inside the track data (the data are one byte shorter than the header
+    says);
+  - one byte that was added inside the track data (one byte longer);
+  - one byte whose value is wrong (the length is right): this includes a flipped bit;
+  - when no single byte explains the CRC (the length is right): a few wrong bits, that is a burst
+    of up to 16 bits (it touches up to three bytes) or two wrong bits anywhere in the track.
 
-The search for repairs is limited, so that opening a damaged archive does not take for ever: 6
-seconds and 150,000 trial unpacks per archive (DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET in the
-source). If the limit stops a search, the report says so.
+The length of the data is the one that the next valid track header gives. When no valid header is
+found where the data end, or one byte further on (the header there is damaged, or the file is
+damaged there), the length that the track itself declares is used: a damaged header next to
+damaged data does not stop the repair. The last track has no next header: the end of the file
+gives its length, and a file that is one byte short or one byte long is repaired like any other
+track.
+
+For a wrong byte the CRC-16 points at the candidates, so only the few positions that can explain
+it are tried. The corrections of bits are not searched but solved from the CRC: for every position
+there is one candidate, which is then unpacked and checked. The checksum is only 16 bits and a sum
+of bytes, so these corrections are accepted under rules that keep a wrong one from passing for a
+right one:
+
+  - In the modes that keep a dictionary (quick, medium, deep, heavy) a candidate must also make
+    the unpacked data end where the packed data end: a stream that has gone out of step does not.
+  - The candidates are tried in classes, the ones that flip the fewest bits first: bursts of 2 to
+    8 wrong bits, then pairs of wrong bits far from each other, then bursts of 9 to 16 bits. A
+    correction is taken only if exactly one candidate of its class gives the right checksum.
+  - If the track unpacked as it is still ends where the packed data end (the damage is in the bits
+    of literals and does not put the stream out of step) the checksum cannot choose among many
+    candidates: only bursts of up to 4 wrong bits are tried.
+  - No compression and simple accept any data and their checksum alone is a weak validation criterion: all the
+    candidates are tried, and a correction is accepted only if it is the only one that fits.
+  - A class that exceeds the per-track candidate-decode limit (DMS_BITS_TRIALS) is skipped. A
+    correction found in a later class has not been compared with the candidates
+    of the class that was skipped, which flip fewer bits: it is taken, but the track is shown as
+    not verified and the report says so. (In no compression and simple a skipped class means that
+    no correction is taken: it could not be shown that the correction is the only one that fits.)
+
+More damage than this (three wrong bytes, a damaged sector) is not repaired: with so many possible
+corrections, one that fits the CRC and the checksum could well be a wrong one. The track is then
+kept as unpacked (best effort). The checksum is 16-bit, so in rare cases a correction
+that is not the right one passes it; the report says what was changed and where.
+
+In the modes that accept any data (no compression and simple) a wrong byte of any value can also
+be "repaired" with another byte that gives the same sum, and the track then looks right. When the
+track holds random data (data that were already compressed, for example) and the wrong byte has
+any value, about one repair in twenty is wrong. The report names the byte that was replaced, so
+that a repair can be checked.
+
+The repair search is bounded by 6 seconds of repair work and 400,000 candidate decodes per
+archive (DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET in the source). Only repair work counts toward
+this time: key search and ordinary track decoding do not use it. The search for wrong bits is limited
+to 40,000 candidate decodes and one second per track (DMS_BITS_TRIALS and DMS_BITS_SECONDS), and
+can use at most half of the archive-wide repair time and decode budget. This leaves resources for
+repairs that require only one byte to be corrected. A class that exceeds the per-track limit is
+skipped (see above). The report identifies searches stopped by a limit or classes that were skipped.
+
+Encrypted archives. A DMS archive can be encrypted with a password. The plug-in does not ask for
+it: the data of an encrypted archive are decrypted with a key that runs through the packed data of
+the tracks, and the plug-in finds the key of the first disk track from its checksum. When the
+first track is a normal disk (the boot block starts with "DOS") the search is short; otherwise the
+65536 possible keys are tried. The key then follows the data of the next tracks, also across a
+track whose packed data were repaired. The search is limited to 30 seconds (DMS_KEY_SECONDS in the
+source), apart from the time of the repairs: if the limit stops it the archive is shown as damaged
+and the report says why. If the header of the archive is damaged, the flag of encryption is read
+as it is and the first track decides (an archive marked as encrypted whose data are not encrypted
+is read as it is). A key changes only the first 20 bytes or so of the first track, so in the
+modes that accept any stream (no compression and simple) a wrong key can have the right checksum.
+The search then counts the keys that fit: if only one gives a boot block that names its root block
+(880 or 1760) it is taken, and if only one fits it is taken; otherwise the first one is taken, the
+track is shown as not verified and the report says that its first bytes are not certain. In the
+other modes a wrong key almost never gives the right checksum, and the first key that fits is
+taken. A key that gives the right checksum but not the end of the packed data (the unpacked data
+do not end where the packed data end) is taken only when no other key fits, because the data may
+be damaged at their end; the track is then shown as not verified and the report says so, since a
+search through the 65536 keys finds about one such key by chance, even when the right one is not
+among them. If no track can be decrypted, a box says that the archive is encrypted and its key was
+not found.
 
 Truncated and partly damaged data
 
   - The data of a track are delimited by the next valid track header. A truncated last track is
     unpacked as far as it goes.
   - In the modes that keep a dictionary from one track to the next (quick, medium, deep, heavy),
-    the loss of one track does not spoil every track after it: tracks that do not need the lost
-    data are still unpacked and verified, the others are kept as best effort (heavy) or discarded
-    (quick, medium, deep).
-  - The decoders are bounds-checked. Incomplete Huffman tables and matches that run past the end of
-    the track are handled.
+    the dictionary is uncertain after a track that was lost or damaged. A track that follows a
+    lost or damaged one is unpacked with the dictionary that the previous tracks left and, if its
+    checksum is not right, once more from an empty dictionary, which gives the right track when
+    it does not need the lost data, so the loss of one track does not spoil every track after it.
+    A track that cannot be verified is kept as unpacked (best effort), so that the tracks that
+    copy from it are not lost too. The report says when a track was unpacked from an empty
+    dictionary.
+  - The decoders are bounds-checked and accept what real archives contain: a last run or a last
+    match that goes past the end of the track is clipped, and an incomplete table of distances in
+    the heavy modes is read as "repeat the last distance". The report says when a track needed
+    such a tolerance. If the checksum of a heavy track that needed one of these two tolerances is
+    not right, the track is read again the other way (the last match completed past the end of
+    the track, the incomplete table read as a Huffman code in which what is not assigned is
+    symbol 0), and the reading whose checksum is right is the one taken.
+  - A track that appears twice in the archive is shown once: the copy that is verified is
+    preferred, or else the first one.
 
 
 6. DAMAGED ADF DISKS
@@ -275,10 +375,30 @@ The reader of ADF images goes on where a plain reader would give up:
     that says FFS on a disk whose files have OFS data blocks is read as OFS.
   - OFS data blocks. When the block table of a file is damaged, lost, or points at a block of
     another file, the data blocks are found by (file header, sequence number). A size field that
-    makes no sense is replaced by the size computed from the data blocks. A data block whose
-    header is damaged gives its data as they are.
+    makes no sense is replaced by the size computed from the data blocks. Every data block is
+    checked against the file that uses it, and the file is shown as incomplete or unverified when
+    a block has to be used although a check failed:
+      - a block that is a data block of another file, or of another place of the same file, is
+        not used (the report says so) and its place is zero, unless the right block is found by
+        (file header, sequence number);
+      - a data block with a wrong checksum is used as it is;
+      - a block that holds less data than the file needs there is used as far as it goes, and the
+        rest is zero;
+      - a block whose header is damaged gives its data as they are.
+    A block of the table that is not a data block (a header, an extension or a directory cache
+    block, for example) is not used either. When two blocks claim the same file and place, the one
+    with a right checksum is used, else the one with the lowest block number, and the report says
+    how many blocks were left out.
+  - Checksums of the blocks of the structure. A file header or an extension block with a wrong
+    checksum is reported; the data of the file are still used, and the file is shown as incomplete
+    or unverified. A directory header with a wrong checksum is reported and counted as a damaged
+    block (Bad Sectors).
   - Block chains. Pointers outside the image, blocks that are not headers and cycles in the hash
     chains are reported; the other entries of the directory are still read.
+  - No root block and no file header. A disk of which neither the root block nor any file header
+    is left, but that still has OFS data blocks with a right checksum, is rebuilt from those
+    blocks: the files appear in _RECOVERED as DATA_<block>.bin (the names are lost with the
+    headers, and so is the exact size: it is the size of the data blocks).
 
 The _RECOVERED folder. Files and data that the directory tree does not reach appear in the folder
 _RECOVERED, in the root of the panel:
@@ -293,8 +413,8 @@ The recovery cannot tell a lost file from a deleted one: a file that was deleted
 whose blocks are still there can also appear in _RECOVERED. That is the price of finding the files
 that really were lost.
 
-The Description column and the information panel say which items could not be read completely, and
-_RECOVERY_REPORT.txt lists what was found and repaired.
+The Description column and the information panel say which items could not be read completely or
+could not be verified, and _RECOVERY_REPORT.txt lists what was found and repaired.
 
 
 7. LIMITS
@@ -309,10 +429,13 @@ _RECOVERY_REPORT.txt lists what was found and repaired.
   - Only the last modification date is read (not the creation date of the disk or the date of the
     root block); protection bits and file comments are not read.
   - Directories nested more than about 60 levels deep are not entered.
-  - Encrypted DMS archives and DMS archives without a disk image are refused (section 3).
+  - DMS archives without a disk image are refused (section 3), and so are encrypted ones whose
+    key is not found and from which nothing can be unpacked.
   - If a memory allocation fails, the call that needed it is lost, Far goes on.
-  - The effort limits for repairs (DMS_REPAIR_SECONDS, DMS_REPAIR_BUDGET) and the largest file that
-    is opened (MAX_FILE_SIZE) are set at the top of the source and can be changed there.
+  - The effort limits for repairs (DMS_REPAIR_SECONDS, DMS_REPAIR_BUDGET, DMS_BITS_TRIALS,
+    DMS_BITS_SECONDS), the time limit for the search of the key of an encrypted archive
+    (DMS_KEY_SECONDS) and the largest file that is opened (MAX_FILE_SIZE) are set at the top of the
+    source and can be changed there.
 
 
 8. LANGUAGES
@@ -364,42 +487,113 @@ What is not translated
 9. BUILDING FROM SOURCE
 ----------------------------------------------------------------------------------------------------
 
-The plug-in is a single C file, adfdmsview.c, plus the version resource adfdmsview.rc (file version,
-author and year, shown in the Details tab of the DLL properties; keep its version equal to the one
-in GetGlobalInfoW: build.bat stops if they differ). Install MSYS2 (default C:\msys64) and put the
-plugin.hpp of Far 3 (the copy that can be included from C) in .\PluginSDK, or in the folder named by
-the variable FARSDK; build.bat also looks in the Headers.c subfolder of that folder and in the
-PluginSDK\Headers.c folder of an installed Far. Then, from the Windows command prompt:
+The plug-in is a single C file, adfdmsview.c, plus the version resource adfdmsview.rc. Run build.bat
+from the Windows Command Prompt; it changes to its own folder, so the caller's current directory does
+not matter. The script builds the 32-bit and 64-bit DLLs with the MSYS2 GCC toolchains.
 
-    build.bat          builds both versions, compressed with UPX
-    build.bat x64      builds .\x64\ADFDMSView.dll (64 bit)
-    build.bat x86      builds .\x86\ADFDMSView.dll (32 bit)
-    build.bat noupx    does not compress the DLLs (can be combined with x64 or x86)
-    build.bat zip      also creates ADFDMSView-<version>.zip (for example ADFDMSView-2.3.0.zip),
-                       with the folders built, ADFDMSView.txt and LICENSE (needs tar.exe, which is
-                       part of Windows 10 and later)
+Commands
 
-The language files (ADFDMSView*.lng) are copied next to each DLL. The
-compilers (mingw-w64-x86_64-gcc and mingw-w64-i686-gcc) and UPX (mingw-w64-x86_64-upx) are
-installed with pacman if they are missing; an upx.exe found through the UPX_EXE variable or the
-PATH is used first. The DLLs are built for size (about 50 KB before UPX). Some antivirus programs
-are suspicious of UPX-packed files: use "noupx" for a DLL that is not packed.
+    build.bat              builds both versions
+    build.bat x64          builds only .\x64\ADFDMSView.dll (64 bit)
+    build.bat x86          builds only .\x86\ADFDMSView.dll (32 bit)
+    build.bat noupx        builds without UPX compression
+    build.bat max          also asks UPX to try --ultra-brute (much slower; not with noupx)
+    build.bat zip          creates ADFDMSView-<version>.zip (needs tar.exe)
+    build.bat x64 max zip  options can be combined
 
-The source has no __declspec(dllexport): the linker exports the functions that are not static, which
-are the entry points of the plug-in (every other function must stay static). The 32 bit DLL is linked
-with -Wl,--kill-at, so that these names are not decorated. After linking, build.bat checks with
-objdump that GetGlobalInfoW, SetStartupInfoW, GetPluginInfoW, AnalyseW, OpenW, GetOpenPanelInfoW,
-GetFindDataW, FreeFindDataW, ClosePanelW, SetDirectoryW, GetFilesW, PutFilesW, DeleteFilesW and
-MakeDirectoryW are exported with their plain names, and the previous DLL is deleted before linking,
-so that a failed build never leaves an old one behind.
+MSYS2
 
-The engine alone (the DMS unpacker and the ADF reader, with no Win32 and no Far headers) is built
-with  gcc -DADF_CORE_ONLY ...
+  - The script searches for MSYS2 in MSYS2_ROOT, C:\msys64, C:\msys2, drives C: to G: and the
+    registered MSYS2 installation path. Set MSYS2_ROOT when it is installed elsewhere.
+  - If MSYS2 is not found, the script offers to download and install it unattended. This offer is
+    made only on x64 Windows 10 version 1809 (build 17763) or later, when curl.exe is available
+    and the destination folder is missing or empty. The default destination is C:\msys64 (or the
+    folder named by MSYS2_ROOT).
+    Answer 1 to download and install; answer 0 to leave the system unchanged and show
+    https://www.msys2.org. The installer is obtained from the official MSYS2 installer project,
+    runs silently, and the new installation is updated with pacman before building. MSYS2 recommends
+    a short ASCII-only path on an NTFS volume, without spaces or network drives; the default
+    C:\msys64 is the safest choice. See https://www.msys2.org/docs/installer/.
+  - On other Windows versions, the script does not attempt an automatic installation. Check the
+    current MSYS2 Windows support requirements before installing it manually; an existing compatible
+    installation can be selected with MSYS2_ROOT.
 
-To add a message to the panel: add a line to the list ADF_MESSAGES in the source (the identifier
-and its English text) and add the message at the same position in every .lng file, with a comment
-above it that names the placeholders.
+C compilers
 
+  - For x64, the default environment is MINGW64 only (package mingw-w64-x86_64-gcc). It is
+    deliberately used because it produces substantially smaller DLLs for this plug-in. UCRT64
+    (mingw-w64-ucrt-x86_64-gcc) is not selected automatically. If MINGW64 is missing, the
+    installation menu offers MINGW64 and UCRT64 and requires an explicit choice. You can also set
+    ENV64=ucrt64 to force UCRT64, or set "ENV64=mingw64 ucrt64" in cmd.exe to search MINGW64 first
+    and UCRT64 second. MSYS2 is phasing out MINGW64, so package availability may change over time.
+  - For x86, the environment is MINGW32 and the package is mingw-w64-i686-gcc. MINGW32 is a
+    legacy 32-bit environment whose package availability has gradually been reduced. It is still
+    needed to produce the 32-bit Far plug-in.
+  - A toolchain is considered available when both gcc.exe and windres.exe are present. If none of
+    the requested environments has them, the script lists the GCC packages it knows for that target
+    and asks which one to install with pacman. Choose 0 to skip that DLL. After installation it
+    checks for the compiler and resource compiler again.
+  - ENV64 and ENV32 can change the environments to try, in order. By default ENV64=mingw64,
+    so UCRT64 is never selected implicitly. Set ENV64=ucrt64 to force it, or ENV64="mingw64 ucrt64"
+    to allow it as a fallback after MINGW64. For x86, use ENV32=mingw32. These names are target-specific.
+
+Far Manager SDK header (plugin.hpp)
+
+  - The project-folder plugin.hpp is checked first. If FARSDK is set, the script checks that folder
+    and its Headers.c subfolder; if the header is not there, it stops and reports the wrong path.
+  - When FARSDK is not set, the script checks PluginSDK, its Headers.c subfolder, and the
+    PluginSDK\Headers.c folder of an installed Far Manager.
+  - If it is still missing and FARSDK was not explicitly set, the script downloads plugin.hpp from
+    the official Far Manager repository into .\PluginSDK. This needs curl.exe. The downloaded
+    header is kept there for later builds.
+  - FARSDK can name the folder containing plugin.hpp or the Headers.c subfolder itself. If FARSDK
+    is set but no header is found there, the script reports the problem instead of silently using a
+    different SDK folder.
+
+UPX compression
+
+  - By default the script searches UPX_EXE, PATH and the MSYS2 folders. If UPX is
+    missing, it tries to install the native MSYS2 UPX package with pacman. This host-tool package
+    selection is independent of the GCC environment used to build the DLL. If UPX cannot be installed, the DLL is still built
+    unpacked and a warning is shown. Use noupx to skip the search and installation entirely.
+  - Normal compression uses --best --lzma. When packing succeeds, the build log reports the DLL
+    size before and after UPX. If UPX fails, the saved unpacked DLL is restored and a warning is
+    shown. With max, UPX is run with --best --ultra-brute --lzma; this tries more variants and can
+    take substantially longer. It does not guarantee that every DLL will become smaller. max and
+    noupx cannot be used together.
+  - Before packing, the script saves a temporary copy of the unpacked DLL. If UPX fails, that copy
+    is restored, so a failed packing attempt does not leave a damaged or partially written DLL.
+
+Other checks and files
+
+  - The version in Info->Version in adfdmsview.c must agree with VER_MAJOR, VER_MINOR, VER_PATCH
+    and VER_BUILD in adfdmsview.rc. VER_STRING must also match the same major.minor.patch version
+    (the build number is appended only when it is not zero). The build stops on a mismatch.
+  - The resource is compiled with windres and linked into the DLL. The script checks that the 14
+    Far entry points are exported with their expected undecorated names, using objdump when it is
+    present in the selected toolchain. If objdump is missing, this export check is skipped with a
+    warning.
+  - The language files (ADFDMSView*.lng) are copied next to each DLL. Each output folder is ready
+    to be copied into Far's Plugins folder.
+  - zip includes the user documentation, the license file and the output folders that were built.
+    It requires tar.exe in PATH (normally included with Windows 10 and later); the license file
+    must be present before building the package.
+
+Optional environment variables
+
+    MSYS2_ROOT   MSYS2 installation folder (default C:\msys64)
+    MSYS2URL     URL of the MSYS2 x86-64 installer used for unattended installation
+    ENV64        x64 environments to try, in order (default: mingw64 only)
+    ENV32        x86 environments to try, in order (default: mingw32)
+    FARSDK       folder containing plugin.hpp, or its Headers.c subfolder
+    UPX_EXE      full path to upx.exe (otherwise PATH and MSYS2 folders are searched)
+
+The compilers, windres, objdump and UPX are supplied by MSYS2 packages and are installed with
+pacman when needed, except that UPX installation is best-effort: the DLL can still be built without
+it. Some antivirus programs are suspicious of UPX-packed files; use noupx for a plain DLL.
+
+The engine alone (the DMS unpacker and the ADF reader, without Win32 and Far headers) can be built
+with gcc -DADF_CORE_ONLY ... .
 
 10. LICENSE
 ----------------------------------------------------------------------------------------------------
@@ -416,10 +610,10 @@ images and archives that it opens, but what it recovers from damaged material ma
 check _RECOVERY_REPORT.txt and keep a copy of anything that matters.
 
 
-11. SOURCES AND LATEST VERSION
+11. SOURCE CODE
 ----------------------------------------------------------------------------------------------------
 
-The source code of ADFDMSView and its latest version are available at:
+The ADFDMSView source code is available at:
 
     https://github.com/Marco-Pistella/ADFDMSView
 

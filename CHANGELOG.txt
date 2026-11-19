@@ -1,0 +1,139 @@
+ADFDMSView - CHANGELOG
+====================================================================================================
+
+Version 2.4.3 (changes from 2.4.2)
+====================================================================================================
+
+Fixes
+
+  - OFS data block validation: reject foreign blocks belonging to another file or sequence number
+    (leave zeros unless matched by header key and sequence number) instead of copying foreign data.
+  - OFS data block checksum and length verification: grade every data block (verified, short, bad
+    checksum, damaged header, unusable) and prefer the better candidate between the block table and
+    the OFS index; keep best-effort data when needed, mark the file as incomplete or unverified,
+    and report the affected block.
+  - Header and extension checksums: verify checksums of file headers, extension blocks, and
+    directory headers; keep readable data, mark affected files as incomplete or unverified, and
+    count damaged directory headers in Bad Sectors.
+  - OFS index duplicate resolution: apply one consistent rule across normal lookups and headerless
+    rebuilds (prefer valid checksum, then lowest block number; discard duplicates and report count).
+  - Encrypted DMS weak keys: distinguish a key matching the track checksum without ending at the
+    packed data boundary (marked as unverified and reported).
+  - DMS repair clock isolation: count DMS_REPAIR_SECONDS and the bit-repair half-budget only while
+    searching for repairs, excluding encryption key search and normal track decoding.
+  - DMS skipped bit-repair classes: mark tracks repaired after skipping an over-budget smaller-weight
+    class as unverified (while keeping NOCOMP/SIMPLE strict uniqueness), and distinguish archive-wide
+    vs per-track limits in the report.
+  - Copy dialog (F5) safety: abort with a message (MErrDialog) instead of overwriting silently if the
+    dialog fails to initialize.
+  - Copy feedback and write cleanup: count and report items copied incomplete or unverified
+    (MCopyPartial), and delete partially written destination files on write errors.
+  - Memory cleanup on failure: free partially initialized ADF structures in pd_open() on failure.
+
+Removed
+
+  - Removed _UNREFERENCED_BLOCKS.RAW and the unreferenced-block IFF FORM scan (adf_unref_scan,
+    adf_mark_dirc, the used-block map, MDescUnref, and related manual/report entries).
+
+Plug-in, Languages, Build & Documentation
+
+  - Language files now have 67 messages: MDescUnref replaced by MCopyPartial, MErrDialog added, and
+    MDescIncomplete updated to "incomplete or unverified blocks".
+  - Panel "Incomplete Files" counter and item descriptions cover both incomplete and unverified files.
+  - Updated plug-in and resource version to 2.4.3.
+  - Rewrote build.bat for easier first-time builds: MSYS2 detection and optional unattended install,
+    interactive GCC toolchain installation via pacman (MINGW64 default for x64, optional UCRT64 via
+    ENV64; MINGW32 for x86), automatic plugin.hpp download when missing, native UPX lookup/install
+    with optional --ultra-brute (max) and unpacked fallback, export verification via objdump, and
+    zip packaging (ADFDMSView.txt, CHANGELOG.TXT, license, and built DLL folders).
+  - Simplified and compacted build.bat control flow and updated README.md, ADFDMSView.txt, and
+    source comments to reflect the current implementation cleanly.
+
+
+Version 2.4.2 (changes from 2.4.1)
+====================================================================================================
+
+Features & Improvements
+
+  - Hardened bit-level DMS repair (bursts up to 16 bits, including bursts starting in the final 15
+    bits of packed data, and distant pairs of wrong bits):
+      - Candidates are solved linearly from CRC-16 and evaluated in increasing bit-weight classes
+        (bursts of 2-8 bits, distant pairs, bursts of 9-16 bits), accepted only if unique within the
+        class (or across all candidates for NOCOMP/SIMPLE).
+      - Dictionary modes (QUICK, MEDIUM, DEEP, HEAVY) also require the unpacked stream to end within
+        DMS_TAIL_BITS (128 bits) of the packed data end.
+      - Tracks whose un-repaired decode still ends at the packed boundary are restricted to short
+        bursts up to DMS_QUIET_WEIGHT (4 bits).
+  - Last-track byte repair: use EOF to detect and repair a lost byte, added byte, or stray trailing
+    byte in the final DMS track.
+  - Added per-track and archive-wide bit-repair bounds: DMS_BITS_TRIALS (40,000) and
+    DMS_BITS_SECONDS (1 s) per track, capped at half of DMS_REPAIR_BUDGET (400,000) and
+    DMS_REPAIR_SECONDS (6 s) per archive.
+
+Fixes & Changes
+
+  - Restricted T_DIRC directory-cache handling to disks with cache bootblock flags (DOS\4 to DOS\7)
+    with cycle protection, and prevented directory listing from altering block-usage tracking.
+  - Ensured DMS_KEY_SECONDS timeouts mark the panel [damaged] and open the archive with its report
+    instead of refusing silently.
+  - Retained _UNREFERENCED_BLOCKS.RAW for non-uniform unreferenced blocks with cross-block IFF FORM
+    reporting.
+
+Plug-in, Languages, Build & Documentation
+
+  - Standardized on the 66-message layout (keeping MValContainerDmsEnc and MValRootMissingData).
+  - Updated version to 2.4.2 across source, resource, build script, README.md, and ADFDMSView.txt.
+
+
+Version 2.4.1 (changes from 2.4.0)
+====================================================================================================
+
+Features & Improvements
+
+  - Restored CRC-16 linear solving for bursts of up to 16 wrong bits and distant pairs of wrong bits.
+  - Increased DMS_REPAIR_BUDGET from 150,000 to 400,000 trial unpacks per archive.
+  - Improved encrypted archive key search: count matching keys in NOCOMP/SIMPLE (preferring a boot
+    block naming root 880 or 1760), mark ambiguous keys as unverified, advance the running key
+    across all track bytes and repaired data, and refuse encrypted archives when no track verifies.
+  - Added alternative decoding passes for HEAVY tracks when the checksum fails under default
+    tolerances (unclipped final match and incomplete distance table mapped via dms_make_table_inc).
+  - Switched CRC-16 calculation to slice-by-8 lookup tables.
+  - Enabled _UNREFERENCED_BLOCKS.RAW whenever unreferenced blocks contain non-uniform data (not
+    only IFF FORM headers) and extended IFF FORM scanning across block boundaries in the report.
+
+Fixes & Changes
+
+  - Unpack DMS tracks with a bad packed CRC as-is before searching for repairs; keep tracks whose
+    unpacked checksum already matches without triggering a repair search.
+  - Trust declared packed length when the following track header is damaged or more than one byte
+    away, reporting and skipping damaged intermediate headers when reached.
+  - Mark DMS archives as [damaged] in the panel title and report when DMS_KEY_SECONDS stops the key
+    search.
+  - Clarified single-byte replacement ambiguity in NOCOMP and SIMPLE modes.
+  - Recognized directory-cache blocks (T_DIRC) with loop protection.
+
+Plug-in, Languages, Build & Documentation
+
+  - Updated MErrEncrypted wording and required CHANGELOG.TXT in build.bat zip.
+  - Updated version to 2.4.1 across source, resource, build script, README.md, and ADFDMSView.txt.
+
+
+Version 2.4.0 (baseline changes from 2.3.0)
+====================================================================================================
+
+Features & Changes
+
+  - Added automatic key search (65,536 keys, DMS_KEY_SECONDS = 30) and decryption for encrypted DMS
+    archives.
+  - Kept partially unpacked or unverified DMS tracks as best-effort (DMT_BEST), retried stateful
+    tracks from an empty dictionary after lost or damaged tracks, and reset dictionaries after
+    non-disk tracks.
+  - Added decoder tolerance for clipped RLE runs/matches and incomplete HEAVY distance tables, and
+    preferred verified copies for duplicate tracks.
+  - Replaced bit-level DMS repairs with length-driven single-byte repair (wrong, lost, added)
+    checked by CRC-16 and unpacked checksum, bounded by DMS_REPAIR_BUDGET (150,000) and
+    DMS_REPAIR_SECONDS (6).
+  - Added headerless ADF file reconstruction from valid OFS data blocks (DATA_<block>.bin in
+    _RECOVERED) and added _UNREFERENCED_BLOCKS.RAW for unreferenced IFF data.
+  - Added MValContainerDmsEnc, MValRootMissingData, and MDescUnref (66 messages total) and updated
+    version to 2.4.0.

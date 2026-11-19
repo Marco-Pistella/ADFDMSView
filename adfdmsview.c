@@ -18,34 +18,59 @@
  *
  * DMS unpacker:
  *   - every track is verified (CRC-16 of the packed data and 16-bit checksum of the unpacked track) and the state of
- *     each track is kept: right, repaired, kept but not verified, lost, absent (DMT_*);
+ *     each track is kept: right, repaired, kept but not verified, kept as unpacked (best effort), lost, absent (DMT_*);
  *   - a track header damaged in one or two bytes (or only its CRC field) is repaired; the archive is recognized also
- *     with a damaged signature or first track header;
- *   - damaged packed data are repaired when the damage is a burst of up to 16 bits, two flipped bits, or one byte
- *     lost or added; a repair is accepted only if the track checksum is then right. The search is bounded by
- *     DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET;
- *   - the data of a track end at the next valid track header; a truncated last track is unpacked as far as it goes;
- *     a track that cannot be verified is kept as unpacked (best effort) so that the tracks that copy from its
- *     dictionary (HEAVY) are not lost too;
- *   - the decoders are bounds-checked; incomplete Huffman tables and matches that run past the end are handled;
+ *     with a damaged signature or first track header; a header that cannot be repaired is skipped by searching the
+ *     next valid one;
+ *   - the data of a track end at the next valid track header, so that a lost or an added byte is seen from the length
+ *     (the last track has no next header: the end of the file gives its length); a truncated last track is unpacked as
+ *     far as it goes;
+ *   - a track whose packed-data CRC is wrong is unpacked as it is first and kept if its checksum is right; else the
+ *     packed data are repaired when one byte has a wrong value, was lost or was added (the length of the data says
+ *     which, the linearity of the CRC-16 points at the candidates) or, if no single byte explains the CRC, when a
+ *     burst of up to 16 bits or two bits are wrong (solved from the CRC, the fewest bits first, accepted only if the
+ *     unpacked data also end where the packed data end and no other candidate of the class fits). A candidate is
+ *     accepted only if the checksum of the unpacked track is then right. The search is bounded by DMS_REPAIR_SECONDS
+ *     (the time spent in the repairs, not the search for a key), DMS_REPAIR_BUDGET and, for the wrong bits,
+ *     DMS_BITS_TRIALS; a correction of bits that is found after a class of candidates with fewer wrong bits was
+ *     skipped because it was too large is shown as not verified;
+ *   - in the modes that keep a dictionary from one track to the next (QUICK, MEDIUM, DEEP, HEAVY) a track that fails
+ *     after a lost or damaged track is decoded a second time from an empty dictionary; a track that cannot be verified
+ *     is kept as unpacked (best effort), so that the tracks that copy from its dictionary are not lost too;
+ *   - the decoders are bounds-checked and tolerate what real archives hold: a last RLE run or a last match that goes
+ *     past the end of the track is clipped, an incomplete table of distances in HEAVY is read as "repeat the last
+ *     distance", incomplete input gives the bytes decoded so far;
+ *   - encrypted archives are decrypted: the key is found from the checksum of the first disk track (a search of at most
+ *     DMS_KEY_SECONDS; if it is stopped the archive is shown as damaged), and the running key follows the packed data
+ *     of the next tracks; a first track that several keys fit, or that only a weak key fits (the checksum is right but
+ *     the packed data do not end where the unpacked data end), is shown as not verified; an archive of which no track
+ *     can be decrypted is refused;
+ *   - a track that appears twice in the archive is stored once (the verified copy, or else the first one);
  *   - the unpacked image is also shown as <archive>.adf, so that it can be copied out;
- *   - archives that do not hold a disk image (disk type 7) and encrypted archives are refused.
+ *   - archives that do not hold a disk image (disk type 7) are refused.
  *
  * ADF reader:
  *   - the image size need not be a multiple of 512 (the whole blocks are used); the bootblock need not be "DOS" when
  *     a valid root block exists; a root block with a wrong checksum is accepted if its hash table still points at
- *     header blocks; with no usable root block the files are found by scanning for file headers;
+ *     header blocks; with no usable root block the files are found by scanning for file headers; with neither a root
+ *     block nor a file header, the files are rebuilt from the OFS data blocks whose checksum is right;
  *   - OFS or FFS is detected from the data blocks, not only from the bootblock;
- *   - in an OFS disk the data blocks of a file are looked up by (file header, sequence number) when the block table is
- *     damaged, lost, or points at a block of another file; a size field that makes no sense is taken from the data
- *     blocks; a block with a damaged header gives its data as they are;
+ *   - in an OFS disk every data block of a file is verified: it names this file and this position, its checksum is
+ *     right and it holds as many bytes as the file needs there. A block that fails validation is replaced by the block
+ *     that names this file and this position (looked up by (file header, sequence number), which also serves when the
+ *     block table is damaged or lost); a block that belongs to another file is never copied into a file; a size field
+ *     that makes no sense is taken from the data blocks;
+ *   - what is kept although it cannot be verified (a data block with a wrong checksum, a damaged header or too few
+ *     bytes; a file header or extension block with a wrong checksum) makes the file "incomplete or unverified": the
+ *     Description column says so, the copy (F5) counts it and the report gives the block;
  *   - files and data blocks that the directory tree does not reach appear in the folder _RECOVERED (paths rebuilt
  *     from the parent pointers; DATA_<block>.bin for data blocks whose file header is lost);
  *   - items that could not be read completely say so in the Description column; _RECOVERY_REPORT.txt (shown only for a
  *     damaged disk) lists what the readers found and repaired.
  *
- * Effort limits at the top of the DMS engine: DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET (search for repairs), and
- * MAX_FILE_SIZE (biggest image or archive that is opened).
+ * Effort limits at the top of the DMS engine: DMS_REPAIR_SECONDS and DMS_REPAIR_BUDGET (search for repairs),
+ * DMS_BITS_TRIALS and DMS_BITS_SECONDS (search for wrong bits in a track), DMS_KEY_SECONDS (search for the key of an encrypted archive),
+ * and MAX_FILE_SIZE (biggest image or archive that is opened).
  *
  * Far side:
  *   - the panel is read-only: PutFilesW, DeleteFilesW, MakeDirectoryW and a move (F6) out of the panel show a box and
@@ -183,11 +208,29 @@ static void core_log_line(int level, const char *fmt, ...)
 #define DMS_STD_TRACKS     80             /* tracks 0..79 are disk data */
 #define DMS_MAX_TRACKS     160            /* the plug-in also takes 160 half-cylinder tracks of 5632 bytes */
 #define DMS_TRACK_HALF     5632
-#define DMS_REPAIR_BUDGET  150000         /* trial unpacks for the repairs of one archive (bounds the opening time) */
+#define DMS_REPAIR_BUDGET  400000         /* Candidate decodes allowed for archive repair (bounds the opening time). */
+#define DMS_BITS_TRIALS    40000          /* Candidate decodes allowed for bit repairs in one track. */
+#ifndef DMS_BITS_SECONDS
+#  define DMS_BITS_SECONDS 1              /* time for the repair of wrong bits in one track */
+#endif
+#define DMS_QUIET_WEIGHT   4              /* most wrong bits of a burst when the damage does not put the stream out of step */
+#define DMS_TAIL_BITS      128            /* a right decode ends at most this many bits before the end of the packed data */
+#ifndef DMS_REPAIR_SECONDS
+#  define DMS_REPAIR_SECONDS 6            /* time for the repairs of one archive */
+#endif
+#ifndef DMS_KEY_SECONDS
+#  define DMS_KEY_SECONDS  30             /* time for the search of the key of an encrypted archive */
+#endif
 #define DMS_TEXT_SIZE      0x4000         /* largest dictionary (mask 0x3FFF) */
 #define DMS_TRACK_DD       11264          /* one cylinder, DD: 2 x 11 x 512 */
 #define DMS_TRACK_HD       22528
 #define DMS_MAX_LOGGED     20             /* detailed error lines per archive */
+
+/* True if the packed data are used up to a few bits before their end: what a right decode of a right stream does */
+static bool dms_tail_ok(long unread)
+{
+    return unread >= 0 && unread <= DMS_TAIL_BITS;
+}
 
 /* heavy */
 #define DMS_NC             510
@@ -213,6 +256,7 @@ typedef struct {
     uint8_t  c_len[DMS_NC], pt_len[DMS_NPT];
     uint16_t c_table[4096], pt_table[256];
     uint16_t lastlen, np;
+    bool     noclip, ptab_alt;                    /* the reading of the data of the attempt that is running (DMS_V_*) */
 } dms_ctx_t;
 
 /* bit reader: reads past the end give zero bits and are counted; a request for more bits than
@@ -267,30 +311,51 @@ static uint16_t dms_checksum(const uint8_t *m, size_t n)
     return u;
 }
 
-/* CRC-16/ARC (polynomial 0xA001 reflected, initial value 0): the table is shared by the checks and by the repairs */
-static const uint16_t *dms_crc_tab(void)
+
+/* CRC-16/ARC (polynomial 0xA001 reflected, initial value 0). Table 0 is the classic one; tables 1 to 7 let eight bytes
+ * go through at once. The tables are shared by the checks and by the repairs. */
+static uint16_t g_dms_crc[8][256];
+
+static void dms_crc_init(void)
 {
-    static uint16_t tab[256];
     static bool init = false;
-    if (!init) {
-        unsigned i, k;
-        for (i = 0; i < 256; i++) {
-            unsigned c = i;
-            for (k = 0; k < 8; k++) c = (c & 1u) ? (c >> 1) ^ 0xA001u : (c >> 1);
-            tab[i] = (uint16_t)c;
-        }
-        init = true;
+    unsigned i, k;
+    if (init) return;
+    for (i = 0; i < 256; i++) {
+        unsigned c = i;
+        for (k = 0; k < 8; k++) c = (c & 1u) ? (c >> 1) ^ 0xA001u : (c >> 1);
+        g_dms_crc[0][i] = (uint16_t)c;
     }
-    return tab;
+    for (k = 1; k < 8; k++)
+        for (i = 0; i < 256; i++)
+            g_dms_crc[k][i] = (uint16_t)((g_dms_crc[k - 1][i] >> 8) ^ g_dms_crc[0][g_dms_crc[k - 1][i] & 0xFF]);
+    init = true;
 }
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#  define DMS_CRC_SLICE8 1
+#endif
 
 static uint16_t dms_crc16(const uint8_t *m, size_t n)
 {
-    const uint16_t *tab = dms_crc_tab();
-    uint16_t crc = 0;
-    while (n--) crc = (uint16_t)(tab[(crc ^ *m++) & 255] ^ ((crc >> 8) & 255));
-    return crc;
+    uint16_t c = 0;
+    dms_crc_init();
+#ifdef DMS_CRC_SLICE8
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, m, 8);
+        w ^= c;                                 /* the 16-bit state meets the first two bytes only */
+        c = (uint16_t)(g_dms_crc[7][w & 0xFF] ^ g_dms_crc[6][(w >> 8) & 0xFF] ^ g_dms_crc[5][(w >> 16) & 0xFF] ^
+                       g_dms_crc[4][(w >> 24) & 0xFF] ^ g_dms_crc[3][(w >> 32) & 0xFF] ^
+                       g_dms_crc[2][(w >> 40) & 0xFF] ^ g_dms_crc[1][(w >> 48) & 0xFF] ^ g_dms_crc[0][w >> 56]);
+        m += 8;
+        n -= 8;
+    }
+#endif
+    while (n--) c = (uint16_t)((c >> 8) ^ g_dms_crc[0][(c ^ *m++) & 0xFF]);
+    return c;
 }
+
 
 /* ---------- tables of MEDIUM and DEEP ---------- */
 static const uint8_t dms_d_code[256] = {
@@ -331,7 +396,30 @@ static const uint8_t dms_d_len[256] = {
     0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08
 };
 
+
 /* ---------- decompressor state ---------- */
+/* What a decoder reports besides its status: the bytes it wrote (a damaged track is still used as far as it could be
+ * decoded), the anomalies it tolerated and how much of the packed data it left unread. */
+#define DMS_Q_RLE_CLIP    1u    /* the last run of the RLE data was longer than the track: clipped */
+#define DMS_Q_MATCH_CLIP  2u    /* the last match of HEAVY went past the end of the data: clipped */
+#define DMS_Q_PTAB        4u    /* HEAVY: incomplete table of distances, every distance is "repeat the last one" */
+#define DMS_Q_PTAB_ALT    8u    /* HEAVY: incomplete table of distances, read as a Huffman code (what is not assigned is symbol 0) */
+#define DMS_Q_MATCH_PAST  16u   /* HEAVY: the last match went past the end of the data and was not clipped */
+
+/* The readings of a HEAVY track. The default one clips the last match and reads an incomplete table of distances as
+ * "repeat the last distance"; when its checksum is wrong the others are tried, in this order. */
+#define DMS_V_NOCLIP      1u    /* the last match is completed: the dictionary advances by all of it */
+#define DMS_V_PTAB_ALT    2u    /* an incomplete table of distances is read as a Huffman code */
+typedef struct {
+    size_t   got;               /* bytes written to the output (never more than the size asked for) */
+    unsigned quirks;            /* DMS_Q_* */
+    long     unread;            /* bits of the packed data not consumed (negative: read past its end); a right
+                                 * decode of a right stream ends within a few bits of the end of the data */
+} dms_out_t;
+
+/* The state of every mode: the dictionaries and the tables are cleared (a track whose flags do not ask to keep them
+ * starts from this state) */
+
 static void dms_init_decrunchers(dms_ctx_t *x)
 {
     x->quick_loc = 251;
@@ -339,67 +427,82 @@ static void dms_init_decrunchers(dms_ctx_t *x)
     x->heavy_loc = 0;
     x->deep_loc = 0x3fc4;
     x->deep_init = 1;
+    x->lastlen = 0;
+    x->np = 0;
+    x->noclip = x->ptab_alt = false;
     memset(x->text, 0, 0x3fc8);
 }
 
+
 /* ---------- RLE (used by every mode but NOCOMP) ---------- */
-/*
- * Returns 0, or 2 if the input ended before the output was complete (what is missing is zero; *done = bytes
- * really decoded). A run that is longer than what is left of the output is cut to fit: the Amiga program
- * does it and the track checksum then matches.
- */
-static int dms_unpack_rle(const uint8_t *in, size_t inlen, uint8_t *out, uint16_t origsize, size_t *done)
+/* A run longer than the room left in the output is clipped: some encoders write the last run of a track past its end,
+ * and the checksum of the track decides. Returns 1 if the input ended before the output was full. */
+
+static int dms_unpack_rle(const uint8_t *in, size_t inlen, uint8_t *out, size_t origsize, dms_out_t *o)
 {
     const uint8_t *ie = in + inlen;
-    uint8_t *out0 = out, *outend = out + origsize;
+    uint8_t *start = out, *outend = out + origsize;
+    int rc = 0;
 
     while (out < outend) {
         uint8_t a, b;
-        if (in >= ie) goto short_input;
+        unsigned n;
+        if (in >= ie) { rc = 1; break; }
         a = *in++;
-        if (a != 0x90) {
-            *out++ = a;
+        if (a != 0x90) { *out++ = a; continue; }
+        if (in >= ie) { rc = 1; break; }
+        b = *in++;
+        if (b == 0) { *out++ = a; continue; }
+        if (in >= ie) { rc = 1; break; }
+        a = *in++;
+        if (b == 0xff) {
+            if (ie - in < 2) { rc = 1; break; }
+            n = ((unsigned)in[0] << 8) | in[1];
+            in += 2;
         } else {
-            unsigned n;
-            if (in >= ie) goto short_input;
-            b = *in++;
-            if (b == 0) {
-                *out++ = a;
-            } else {
-                if (in >= ie) goto short_input;
-                a = *in++;
-                if (b == 0xff) {
-                    if (ie - in < 2) goto short_input;
-                    n = ((unsigned)in[0] << 8) | in[1];
-                    in += 2;
-                } else {
-                    n = b;
-                }
-                if ((size_t)(outend - out) < n) n = (unsigned)(outend - out);
-                memset(out, a, n);
-                out += n;
-            }
+            n = b;
         }
+        if ((size_t)(outend - out) < n) {
+            n = (unsigned)(outend - out);
+            o->quirks |= DMS_Q_RLE_CLIP;
+        }
+        memset(out, a, n);
+        out += n;
     }
-    *done = (size_t)(out - out0);
-    return 0;
-short_input:
-    *done = (size_t)(out - out0);
-    memset(out, 0, (size_t)(outend - out));
-    return 2;
+    o->got = (size_t)(out - start);
+    o->unread = 8 * (long)(ie - in);
+    return rc;
 }
 
+
+/* bits of the input that a bit-reader decoder did not consume (negative: it read past the end) */
+
+static long dms_unread_bits(const dms_bits_t *b, const uint8_t *in, size_t inlen)
+{
+    return 8 * (long)inlen - (8 * ((long)(b->p - in) + (long)b->over) - (long)b->cnt);
+}
+
+
+/* bytes written by a dictionary decoder: a final match may run a few bytes past the end (DMS_SLACK) */
+
+static size_t dms_written(const uint8_t *start, const uint8_t *out, size_t origsize)
+{
+    size_t n = (size_t)(out - start);
+    return n < origsize ? n : origsize;
+}
+
+
 /* ---------- QUICK ---------- */
+
 static int dms_unpack_quick(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8_t *out,
-                            uint16_t origsize, size_t *produced)
+                            uint16_t origsize, dms_out_t *o)
 {
     dms_bits_t b;
-    uint8_t *out0 = out, *outend = out + origsize;
+    uint8_t *start = out, *outend = out + origsize;
     uint16_t i, j;
 
     dms_bits_init(&b, in, inlen);
-    while (out < outend) {
-        if (dms_bits_fail(&b)) return 1;
+    while (out < outend && !dms_bits_fail(&b)) {
         if (DMS_GETBITS(&b, 1) != 0) {
             dms_drop(&b, 1);
             *out++ = x->text[x->quick_loc++ & 0xff] = (uint8_t)DMS_GETBITS(&b, 8);
@@ -413,23 +516,26 @@ static int dms_unpack_quick(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8
             while (j--) *out++ = x->text[x->quick_loc++ & 0xff] = x->text[i++ & 0xff];
         }
     }
+    o->got = dms_written(start, out, origsize);
+    o->unread = dms_unread_bits(&b, in, inlen);
+    if (out < outend) return 1;                    /* a failed read: the position in the dictionary stays */
     x->quick_loc = (uint16_t)((x->quick_loc + 5) & 0xff);
-    *produced = (size_t)(out - out0);
     return dms_bits_fail(&b) ? 1 : 0;
 }
 
+
 /* ---------- MEDIUM ---------- */
+
 static int dms_unpack_medium(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8_t *out,
-                             uint16_t origsize, size_t *produced)
+                             uint16_t origsize, dms_out_t *o)
 {
     dms_bits_t b;
-    uint8_t *out0 = out, *outend = out + origsize;
+    uint8_t *start = out, *outend = out + origsize;
     uint16_t i, j, c;
     uint8_t u;
 
     dms_bits_init(&b, in, inlen);
-    while (out < outend) {
-        if (dms_bits_fail(&b)) return 1;
+    while (out < outend && !dms_bits_fail(&b)) {
         if (DMS_GETBITS(&b, 1) != 0) {
             dms_drop(&b, 1);
             *out++ = x->text[x->medium_loc++ & 0x3fff] = (uint8_t)DMS_GETBITS(&b, 8);
@@ -449,10 +555,13 @@ static int dms_unpack_medium(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint
             while (j--) *out++ = x->text[x->medium_loc++ & 0x3fff] = x->text[i++ & 0x3fff];
         }
     }
+    o->got = dms_written(start, out, origsize);
+    o->unread = dms_unread_bits(&b, in, inlen);
+    if (out < outend) return 1;
     x->medium_loc = (uint16_t)((x->medium_loc + 66) & 0x3fff);
-    *produced = (size_t)(out - out0);
     return dms_bits_fail(&b) ? 1 : 0;
 }
+
 
 /* ---------- DEEP (LZ + dynamic Huffman) ---------- */
 static void dms_deep_init_tabs(dms_ctx_t *x)
@@ -559,17 +668,18 @@ static uint16_t dms_deep_decode_pos(dms_bits_t *b)
     return (uint16_t)(c | i);
 }
 
+
+
 static int dms_unpack_deep(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8_t *out,
-                           uint16_t origsize, size_t *produced)
+                           uint16_t origsize, dms_out_t *o)
 {
     dms_bits_t b;
-    uint8_t *out0 = out, *outend = out + origsize;
+    uint8_t *start = out, *outend = out + origsize;
     uint16_t i, j, c;
 
     dms_bits_init(&b, in, inlen);
     if (x->deep_init) dms_deep_init_tabs(x);
-    while (out < outend) {
-        if (dms_bits_fail(&b)) return 1;
+    while (out < outend && !dms_bits_fail(&b)) {
         c = dms_deep_decode_char(x, &b);
         if (c < 256) {
             *out++ = x->text[x->deep_loc++ & 0x3fff] = (uint8_t)c;
@@ -579,22 +689,128 @@ static int dms_unpack_deep(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8_
             while (j--) *out++ = x->text[x->deep_loc++ & 0x3fff] = x->text[i++ & 0x3fff];
         }
     }
+    o->got = dms_written(start, out, origsize);
+    o->unread = dms_unread_bits(&b, in, inlen);
+    if (out < outend) return 1;
     x->deep_loc = (uint16_t)((x->deep_loc + 60) & 0x3fff);
-    *produced = (size_t)(out - out0);
     return dms_bits_fail(&b) ? 1 : 0;
 }
 
+
 /* ---------- HEAVY 1 / 2 (LZ + static Huffman, from UNIX LHA) ---------- */
-/*
- * Decoding table of a canonical Huffman code (lengths in bitlen[0..nchar-1]): the first
- * `tablebits` bits of the stream index `table`; a longer code goes on in the nodes left[] / right[]
- * (indices from nchar up). The code of a symbol is given by its length and by its position among the symbols of
- * that length; lengths go up to tablebits + 16 (17 bits and more occur in DMS 1.11 / 1.12 archives). A code that
- * does not fill the code space is accepted: DMS 1.11 writes one for a track made of a single kind of match, and
- * a decoder is not asked to complete it. What is not assigned decodes as symbol 0. Returns 0, or an error number
- * for an over-subscribed code, a length the decoders cannot read or too many nodes.
- */
-static int dms_make_table(dms_ctx_t *x, uint16_t nchar, const uint8_t *bitlen,
+typedef struct {
+    int16_t         c;
+    uint16_t        n, tblsiz, len, depth, maxdepth, avail, codeword, bit, taberr;
+    uint16_t       *tbl, *left, *right;
+    const uint8_t  *blen;
+} dms_mk_t;
+
+/* Builds the decoding table of a canonical Huffman code, walking the tree of the code lengths: the first `tablebits`
+ * bits of the stream index the table; a longer code goes on in the nodes left[] / right[] (indices from the number of
+ * symbols up). Sets taberr for an over-subscribed code, a code that is too deep or too many nodes. */
+
+static uint16_t dms_mktbl(dms_mk_t *m)
+{
+    uint16_t i = 0;
+
+    if (m->taberr) return 0;
+    if (m->len == m->depth) {
+        while (++m->c < (int)m->n)
+            if (m->blen[m->c] == m->len) {
+                i = m->codeword;
+                m->codeword = (uint16_t)(m->codeword + m->bit);
+                if (m->codeword > m->tblsiz) {
+                    m->taberr = 1;
+                    return 0;
+                }
+                while (i < m->codeword) m->tbl[i++] = (uint16_t)m->c;
+                return (uint16_t)m->c;
+            }
+        m->c = -1;
+        m->len++;
+        m->bit = (uint16_t)(m->bit >> 1);
+    }
+    m->depth++;
+    if (m->depth < m->maxdepth) {
+        dms_mktbl(m);
+        dms_mktbl(m);
+    } else if (m->depth > 32) {
+        m->taberr = 2;
+        return 0;
+    } else {
+        if ((i = m->avail++) >= 2 * m->n - 1) {
+            m->taberr = 3;
+            return 0;
+        }
+        m->left[i] = dms_mktbl(m);
+        m->right[i] = dms_mktbl(m);
+        if (m->codeword >= m->tblsiz) {
+            m->taberr = 4;
+            return 0;
+        }
+        if (m->depth == m->maxdepth) m->tbl[m->codeword++] = i;
+    }
+    m->depth--;
+    return i;
+}
+
+
+/* The table of nchar symbols with lengths bitlen[]: returns 0, or an error number if the code is not complete or cannot
+ * be built */
+
+static uint16_t dms_make_table(dms_ctx_t *x, uint16_t nchar, const uint8_t *bitlen,
+                               uint16_t tablebits, uint16_t *table)
+{
+    dms_mk_t m;
+    memset(&m, 0, sizeof(m));
+    m.n = m.avail = nchar;
+    m.blen = bitlen;
+    m.tbl = table;
+    m.left = x->left;
+    m.right = x->right;
+    m.tblsiz = (uint16_t)(1U << tablebits);
+    m.bit = (uint16_t)(m.tblsiz / 2);
+    m.maxdepth = (uint16_t)(tablebits + 1);
+    m.depth = m.len = 1;
+    m.c = -1;
+    dms_mktbl(&m);                                 /* left subtree */
+    if (m.taberr) return m.taberr;
+    dms_mktbl(&m);                                 /* right subtree */
+    if (m.taberr) return m.taberr;
+    if (m.codeword != m.tblsiz) return 5;
+    return 0;
+}
+
+
+
+static int dms_heavy_read_tree_c(dms_ctx_t *x, dms_bits_t *b)
+{
+    uint16_t i, n;
+    n = DMS_GETBITS(b, 9);
+    dms_drop(b, 9);
+    if (n > 0) {
+        if (n > DMS_NC) return 1;                  /* more lengths than c_len holds */
+        for (i = 0; i < n; i++) {
+            x->c_len[i] = (uint8_t)DMS_GETBITS(b, 5);
+            dms_drop(b, 5);
+        }
+        for (i = n; i < DMS_NC; i++) x->c_len[i] = 0;
+        if (dms_make_table(x, DMS_NC, x->c_len, 12, x->c_table)) return 1;
+    } else {
+        n = DMS_GETBITS(b, 9);
+        dms_drop(b, 9);
+        for (i = 0; i < DMS_NC; i++) x->c_len[i] = 0;
+        for (i = 0; i < 4096; i++) x->c_table[i] = n;
+    }
+    return 0;
+}
+
+
+/* Decoding table of a canonical Huffman code (lengths in bitlen[0..nchar-1]) that may leave part of the code space
+ * unassigned: what is not assigned decodes as symbol 0. The first `tablebits` bits of the stream index `table`; a longer
+ * code goes on in the nodes left[] / right[] (indices from nchar up). Returns 0, or an error number for an
+ * over-subscribed code, a length the decoders cannot read or too many nodes. */
+static int dms_make_table_inc(dms_ctx_t *x, uint16_t nchar, const uint8_t *bitlen,
                           uint16_t tablebits, uint16_t *table)
 {
     uint32_t count[32], next[32], code;
@@ -662,31 +878,15 @@ static int dms_make_table(dms_ctx_t *x, uint16_t nchar, const uint8_t *bitlen,
     return 0;
 }
 
-static int dms_heavy_read_tree_c(dms_ctx_t *x, dms_bits_t *b)
-{
-    uint16_t i, n;
-    n = DMS_GETBITS(b, 9);
-    dms_drop(b, 9);
-    if (n > 0) {
-        if (n > DMS_NC) return 1;                  /* more lengths than c_len holds */
-        for (i = 0; i < n; i++) {
-            x->c_len[i] = (uint8_t)DMS_GETBITS(b, 5);
-            dms_drop(b, 5);
-        }
-        for (i = n; i < DMS_NC; i++) x->c_len[i] = 0;
-        if (dms_make_table(x, DMS_NC, x->c_len, 12, x->c_table)) return 1;
-    } else {
-        n = DMS_GETBITS(b, 9);
-        dms_drop(b, 9);
-        for (i = 0; i < DMS_NC; i++) x->c_len[i] = 0;
-        for (i = 0; i < 4096; i++) x->c_table[i] = n;
-    }
-    return 0;
-}
+/* The table of distances. An incomplete table (its lengths do not fill the code space) cannot be built: it is read as
+ * "repeat the last distance, no bits" (DMS_Q_PTAB), which gives the right data for a fill made of one long match always at
+ * the same distance; the checksum of the track tells whether that was the right reading; if it was not, the table is read as a Huffman code in
+ * which what is not assigned is symbol 0 (ptab_alt). */
 
-static int dms_heavy_read_tree_p(dms_ctx_t *x, dms_bits_t *b)
+static int dms_heavy_read_tree_p(dms_ctx_t *x, dms_bits_t *b, dms_out_t *o)
 {
     uint16_t i, n;
+    unsigned kraft = 0;
     n = DMS_GETBITS(b, 5);
     dms_drop(b, 5);
     if (n > 0) {
@@ -696,7 +896,20 @@ static int dms_heavy_read_tree_p(dms_ctx_t *x, dms_bits_t *b)
             dms_drop(b, 4);
         }
         for (i = n; i < x->np; i++) x->pt_len[i] = 0;
-        if (dms_make_table(x, x->np, x->pt_len, 8, x->pt_table)) return 1;
+        for (i = 0; i < x->np; i++)
+            if (x->pt_len[i]) kraft += 1u << (16 - x->pt_len[i]);
+        if (kraft < 0x10000u && x->ptab_alt) {
+            /* an incomplete table: the other reading (see above) */
+            o->quirks |= DMS_Q_PTAB_ALT;
+            if (dms_make_table_inc(x, x->np, x->pt_len, 8, x->pt_table)) return 1;
+        } else if (kraft < 0x10000u) {
+            /* an incomplete table: see above */
+            for (i = 0; i < x->np; i++) x->pt_len[i] = 0;
+            for (i = 0; i < 256; i++) x->pt_table[i] = (uint16_t)(x->np - 1);
+            o->quirks |= DMS_Q_PTAB;
+        } else if (dms_make_table(x, x->np, x->pt_len, 8, x->pt_table)) {
+            return 1;
+        }
     } else {
         n = DMS_GETBITS(b, 5);
         dms_drop(b, 5);
@@ -705,6 +918,8 @@ static int dms_heavy_read_tree_p(dms_ctx_t *x, dms_bits_t *b)
     }
     return 0;
 }
+
+
 
 /* returns the symbol, or 0xFFFF on a corrupt tree */
 static uint16_t dms_heavy_decode_c(dms_ctx_t *x, dms_bits_t *b)
@@ -759,97 +974,121 @@ static uint16_t dms_heavy_decode_p(dms_ctx_t *x, dms_bits_t *b)
     return x->lastlen;
 }
 
+
+/* A match that would go past the end of the data is clipped, and the dictionary advances only by the bytes really
+ * written (with x->noclip the match is completed instead, into the slack of the buffer, and the dictionary advances by all
+ * of it). Returns 1 on damaged data (the tables, a code, the end of the input). */
+
 static int dms_unpack_heavy(dms_ctx_t *x, const uint8_t *in, size_t inlen, uint8_t *out,
-                            uint8_t flags, uint16_t origsize, size_t *produced)
+                            uint8_t flags, uint16_t origsize, dms_out_t *o)
 {
     dms_bits_t b;
-    uint8_t *out0 = out, *outend = out + origsize;
+    uint8_t *start = out, *outend = out + origsize;
     uint16_t j, i, c, bitmask;
+    bool bad = false;
 
     if (flags & 8) { x->np = 15; bitmask = 0x1fff; }   /* Heavy 2: 8 KiB dictionary */
     else           { x->np = 14; bitmask = 0x0fff; }   /* Heavy 1: 4 KiB dictionary */
     dms_bits_init(&b, in, inlen);
-    if (flags & 2) {
-        if (dms_heavy_read_tree_c(x, &b)) return 1;
-        if (dms_heavy_read_tree_p(x, &b)) return 2;
+    if ((flags & 2) && (dms_heavy_read_tree_c(x, &b) || dms_heavy_read_tree_p(x, &b, o))) {
+        o->got = 0;
+        o->unread = dms_unread_bits(&b, in, inlen);
+        return 1;
     }
     while (out < outend) {
-        if (dms_bits_fail(&b)) return 3;
+        if (dms_bits_fail(&b)) { bad = true; break; }
         c = dms_heavy_decode_c(x, &b);
-        if (c == 0xFFFF) return 4;
+        if (c == 0xFFFF) { bad = true; break; }
         if (c < 256) {
             *out++ = x->text[x->heavy_loc++ & bitmask] = (uint8_t)c;
         } else {
             uint16_t p = dms_heavy_decode_p(x, &b);
-            if (p == 0xFFFF) return 5;
+            if (p == 0xFFFF) { bad = true; break; }
             j = (uint16_t)(c - DMS_OFFSET);
             i = (uint16_t)(x->heavy_loc - p - 1);
+            if (j > (size_t)(outend - out)) {
+                if (x->noclip) {
+                    o->quirks |= DMS_Q_MATCH_PAST;                 /* completed, into the slack of the buffer */
+                } else {
+                    j = (uint16_t)(outend - out);
+                    o->quirks |= DMS_Q_MATCH_CLIP;
+                }
+            }
             while (j--) *out++ = x->text[x->heavy_loc++ & bitmask] = x->text[i++ & bitmask];
         }
     }
-    *produced = (size_t)(out - out0);
-    return dms_bits_fail(&b) ? 6 : 0;
+    o->got = (size_t)(out - start);
+    o->unread = dms_unread_bits(&b, in, inlen);
+    return bad || dms_bits_fail(&b) ? 1 : 0;
 }
 
+
 /* ---------- one track ---------- */
-/* b1: packed track (pklen1 bytes); the unpacked track is returned in b2 (unpklen bytes).
- * Both buffers have DMS_TRACK_MAX + DMS_SLACK bytes. Returns 0 or an error number. */
-/* One LZ stage (modes 2-6) producing `want` bytes (the last match may run past them: *made) */
-static int dms_lz_stage(dms_ctx_t *x, uint8_t cmode, uint8_t flags, uint8_t *b1, size_t pklen1, uint8_t *b2,
-                        uint16_t want, size_t *made)
+/* The first stage of the modes with a dictionary (QUICK, MEDIUM, DEEP, HEAVY1/2). */
+
+static int dms_stage1(dms_ctx_t *x, unsigned cmode, const uint8_t *b1, size_t pklen1, uint8_t *b2,
+                      uint16_t pklen2, uint8_t flags, dms_out_t *m)
 {
     switch (cmode) {
-    case 2: return dms_unpack_quick(x, b1, pklen1, b2, want, made);
-    case 3: return dms_unpack_medium(x, b1, pklen1, b2, want, made);
-    case 4: return dms_unpack_deep(x, b1, pklen1, b2, want, made);
+    case 2:  return dms_unpack_quick(x, b1, pklen1, b2, pklen2, m);
+    case 3:  return dms_unpack_medium(x, b1, pklen1, b2, pklen2, m);
+    case 4:  return dms_unpack_deep(x, b1, pklen1, b2, pklen2, m);
     default: return dms_unpack_heavy(x, b1, pklen1, b2, cmode == 5 ? (uint8_t)(flags & 7) : (uint8_t)(flags | 8),
-                                     want, made);
+                                     pklen2, m);
     }
 }
 
-/*
- * Unpacks one track into b2. Returns 0 (done), 1 (failed), 2 (unknown mode) or 3 (done, but the RLE data ended
- * before the track was complete: the rest is zero). The RLE stage reads all that the LZ stage produced,
- * also what a last match put past pklen2: pklen2 is the length of the data that the stage must decode, not
- * always the end of the RLE data.
- */
-static int dms_unpack_track(dms_ctx_t *x, uint8_t *b1, size_t pklen1, uint8_t *b2,
-                            uint16_t pklen2, uint16_t unpklen, uint8_t cmode, uint8_t flags)
-{
-    size_t made = 0, done = 0;
-    int rr = 0;
 
+/* b1: packed track (pklen1 bytes); the unpacked track is returned in b2 (unpklen bytes). Both buffers have
+ * DMS_TRACK_MAX + DMS_SLACK bytes. Returns 0 (decoded), 1 (damaged or too short data: b2 holds what could be decoded,
+ * the rest is zero) or 2 (unknown mode: b2 not valid). With 1 and 2 the state of the decompressor is not reset. *o:
+ * bytes of b2 really decoded, anomalies tolerated, packed bits left unread. The RLE stage reads all that the first
+ * stage produced, also what a last match put past pklen2. */
+
+static int dms_unpack_track(dms_ctx_t *x, uint8_t *b1, size_t pklen1, uint8_t *b2,
+                            uint16_t pklen2, uint16_t unpklen, uint8_t cmode, uint8_t flags, dms_out_t *o)
+{
+    dms_out_t m = { 0, 0, 0 };                     /* first stage */
+    int rc = 0;
+
+    o->got = 0;
+    o->quirks = 0;
+    o->unread = 0;
     switch (cmode) {
     case 0:                                        /* NOCOMP */
-        if (unpklen > pklen1) return 1;
-        memcpy(b2, b1, unpklen);
+        o->got = pklen1 < unpklen ? pklen1 : unpklen;
+        memcpy(b2, b1, o->got);
+        rc = pklen1 < unpklen;
+        o->unread = 8 * ((long)pklen1 - (long)o->got);
         break;
     case 1:                                        /* SIMPLE */
-        rr = dms_unpack_rle(b1, pklen1, b2, unpklen, &done);
+        rc = dms_unpack_rle(b1, pklen1, b2, unpklen, o);
         break;
-    case 2:                                        /* QUICK */
-    case 3:                                        /* MEDIUM */
-    case 4:                                        /* DEEP */
-        if (dms_lz_stage(x, cmode, flags, b1, pklen1, b2, pklen2, &made)) return 1;
-        rr = dms_unpack_rle(b2, made, b1, unpklen, &done);
-        memcpy(b2, b1, unpklen);
-        break;
-    case 5:                                        /* HEAVY 1 */
-    case 6:                                        /* HEAVY 2 */
-        if (dms_lz_stage(x, cmode, flags, b1, pklen1, b2, pklen2, &made)) return 1;
-        if (flags & 4) {                           /* RLE only if this flag is set */
-            rr = dms_unpack_rle(b2, made, b1, unpklen, &done);
-            memcpy(b2, b1, unpklen);
-        } else if (unpklen > made) {
-            return 1;
+    case 2: case 3: case 4: case 5: case 6:        /* QUICK, MEDIUM, DEEP, HEAVY 1, HEAVY 2 */
+        rc = dms_stage1(x, cmode, b1, pklen1, b2, pklen2, flags, &m);
+        o->quirks = m.quirks;
+        o->unread = m.unread;
+        if (cmode >= 5 && !(flags & 4)) {          /* HEAVY: RLE only if this flag is set */
+            o->got = m.got < unpklen ? m.got : unpklen;
+            if (m.got < unpklen) rc = 1;
+        } else {                                   /* RLE over the bytes the first stage wrote */
+            dms_out_t r2 = { 0, 0, 0 };
+            rc |= dms_unpack_rle(b2, m.got, b1, unpklen, &r2);
+            o->got = r2.got;
+            o->quirks |= r2.quirks;
+            memcpy(b2, b1, o->got);
         }
         break;
     default:
         return 2;                                  /* unknown mode */
     }
+    if (o->got < unpklen) memset(b2 + o->got, 0, unpklen - o->got);
+    if (rc) return 1;
     if (!(flags & 1)) dms_init_decrunchers(x);
-    return rr == 2 ? 3 : 0;
+    return 0;
 }
+
+
 
 static const char *dms_mode_name(unsigned m)
 {
@@ -860,7 +1099,7 @@ static const char *dms_mode_name(unsigned m)
 /* ---------- archive ---------- */
 /* "DMS!", the 56-byte archive header and the header of a first track ("TR"): a file that is only a header
  * (56 bytes: valid header CRC, no track) has no disk in it and is not a DMS */
-/* "TR" and sane sizes: the part of the test of a track header that does not need the CRC */
+/* "TR" and sane sizes: the structural checks of a track header that do not need the CRC. */
 static bool dms_hdr_sane(const uint8_t *t)
 {
     return t[0] == 'T' && t[1] == 'R' && (((unsigned)t[6] << 8) | t[7]) <= DMS_TRACK_MAX &&
@@ -899,22 +1138,20 @@ static void dms_log_error(unsigned *shown, const char *fmt, ...)
     log_error("%s", buf);
 }
 
-/* Heavy track lost: the encoder wrote pklen2 bytes in the dictionary for it, so the write position
- * goes on by that much; if the track was to end with a reset, the dictionary is cleared as the encoder did */
-static void dms_heavy_lost(dms_ctx_t *x, unsigned flags, uint16_t loc_before, unsigned pklen2)
-{
-    if (!(flags & 1)) dms_init_decrunchers(x);
-    else x->heavy_loc = (uint16_t)(loc_before + pklen2);
-}
+
+
 
 /* First valid track header ("TR", header CRC, sane sizes) at or after `from`: where a damaged archive goes on */
-/* a valid track header at d[pos] (the test dms_resync uses at every offset) */
+/* a valid track header at t (20 bytes): "TR", sane sizes and the right CRC of its first 18 bytes */
+static bool dms_header_ok(const uint8_t *t)
+{
+    return dms_hdr_sane(t) && dms_crc16(t, DMS_THLEN - 2) == (uint16_t)(((unsigned)t[18] << 8) | t[19]);
+}
+
+/* Whether d[pos] contains a valid track header; used by dms_resync at each offset. */
 static bool dms_header_at(const uint8_t *d, uint64_t size, uint64_t pos)
 {
-    const uint8_t *t;
-    if (pos + DMS_THLEN > size) return false;
-    t = d + pos;
-    return dms_hdr_sane(t) && dms_crc16(t, DMS_THLEN - 2) == (uint16_t)(((unsigned)t[18] << 8) | t[19]);
+    return pos + DMS_THLEN <= size && dms_header_ok(d + pos);
 }
 
 static bool dms_resync(const uint8_t *data, uint64_t size, uint64_t from, uint64_t *found)
@@ -934,7 +1171,7 @@ static bool dms_resync(const uint8_t *data, uint64_t size, uint64_t from, uint64
  * the CRC field) is searched. A candidate must have the right CRC and sane sizes, and is accepted if the track
  * number is the expected one or if the data it announces end at a valid track header (or at the end of the
  * archive). Among several candidates the one that satisfies both is taken; with one that satisfies only the
- * consistency test, only if it is the only candidate.
+ * consistency check, only if it is the only candidate.
  */
 
 /* CRC-16 is linear: dms_hz[p][e] is the CRC of the 18 header bytes that are all zero but e at position p, and
@@ -989,7 +1226,7 @@ typedef struct { uint8_t best[DMS_THLEN]; int score; unsigned nbest; } dms_hfix_
 /*
  * Scores a candidate header c (its CRC is right): the track number must be the expected one (else the candidate is
  * dropped); then +1 if the data it announces end at a valid track header (or at the end of the archive), +4 if the
- * CRC of those data is the one in the candidate (the strongest proof: it rejects candidates that changed the
+ * CRC of those data is the one in the candidate (the strongest validation condition: it rejects candidates that alter the
  * length or the CRC field). The best candidate is taken only if it is the only one with that score.
  */
 static void dms_hfix_consider(dms_hfix_t *f, const uint8_t *c, const uint8_t *data, uint64_t size, uint64_t pos,
@@ -1058,275 +1295,720 @@ static bool dms_fix_header(const uint8_t *data, uint64_t size, uint64_t pos, uns
     return true;
 }
 
-/*
- * Repair of a track whose packed data are damaged. CRC-16/ARC with initial value 0 is linear: the CRC of
- * damaged data differs from the stored CRC by a value that depends only on the error pattern and its position, so
- * the CRC alone points at the candidates, and the 16-bit checksum of the unpacked track (and a trial unpack) tells
- * which candidate is right. Three kinds of damage are repaired:
- *   - substitution: any error confined to a window of 16 bits (one bit, one byte, two adjacent bytes, ...). CRC-16
- *     detects every such burst and, for a given position, exactly one pattern explains the CRC difference;
- *   - one byte lost inside the track data (the data are one byte shorter than the header says): the byte is
- *     re-inserted at every position, with every value that satisfies the CRC;
- *   - one byte added (one byte longer): each byte is removed in turn.
- * A repair is accepted only if the unpacked track has the checksum of the track header. The decoder state is
- * always left as it was before the track (x == xs on return); the caller unpacks the repaired data again.
- */
-#define DMS_REPAIR_MAX_TRIES 40000
 
+/* ---------- decoding of one track with verification ---------- */
+typedef struct {
+    dms_ctx_t *x;                  /* decompressor state (in/out) */
+    dms_ctx_t *xs, *xp, *xr;       /* snapshots: before the track, after the first attempt, before a repair */
+    uint8_t   *b1, *b2, *cand;     /* work buffers of DMS_TRACK_MAX + DMS_SLACK bytes */
+    uint8_t   *keep;               /* the output of the first attempt while the second one runs */
+    bool       unsure;             /* the dictionary may differ from the encoder's */
+    unsigned   pklen2, unpklen, cmode, flags, usum;
+    size_t     got;                /* result: bytes of b2 really decoded (the rest is zero) */
+    unsigned   quirks;             /* result: DMS_Q_* anomalies tolerated by the attempt kept in b2 */
+    long       unread;             /* result: bits of the packed data not consumed (see dms_out_t) */
+    bool       enc;                /* the packed data is encrypted; k0 is the key at the start of the track */
+    uint16_t   k0;
+    bool       ambiguous;          /* result of dms_find_key: another key gives the right checksum too */
+    bool       weakkey;            /* result of dms_find_key: the key gives the right checksum, but the packed data do not end
+                                    * where the unpacked data end (the stream must be fully consumed) */
+    bool       rep_skipped;        /* result of dms_repair_multi: a class of candidates with fewer wrong bits than the one that
+                                    * gave the correction exceeded the per-track candidate-decode budget and was skipped */
+    bool       loud;               /* unpacked as it is, the data lose the end of the packed data (the stream is out of step) */
+} dms_trk_t;
 
-static uint16_t dms_crc_tab_at(unsigned i) { return dms_crc_tab()[i & 255]; }
+/* the anomalies tolerated while decoding (DMS_Q_*), as text for the report */
 
-/* L: state transition of the CRC for a zero input byte */
-static uint16_t dms_crc_L(uint16_t s) { return (uint16_t)(dms_crc_tab_at(s) ^ (s >> 8)); }
-
-static uint16_t dms_zval(const uint16_t zb[8], unsigned e)
+static void dms_quirk_text(unsigned q, char *buf, size_t n)
 {
-    uint16_t v = 0;
-    unsigned j;
-    for (j = 0; j < 8; j++) if ((e >> j) & 1u) v ^= zb[j];
-    return v;
+    static const struct { unsigned bit; const char *text; } tab[] = {
+        { DMS_Q_RLE_CLIP,   "the last RLE run is longer than the track: clipped" },
+        { DMS_Q_MATCH_CLIP, "the last match goes past the end of the data: clipped" },
+        { DMS_Q_PTAB,       "incomplete table of distances: read as \"repeat the last distance\"" },
+        { DMS_Q_PTAB_ALT,   "incomplete table of distances: read as a Huffman code, what is not assigned is symbol 0" },
+        { DMS_Q_MATCH_PAST, "the last match goes past the end of the data: not clipped" },
+    };
+    size_t i, len = 0;
+    buf[0] = '\0';
+    for (i = 0; i < sizeof(tab) / sizeof(tab[0]); i++) {
+        if (!(q & tab[i].bit)) continue;
+        len += (size_t)snprintf(buf + len, n - len, "%s%s", len ? "; " : "", tab[i].text);
+        if (len >= n) { buf[n - 1] = '\0'; return; }
+    }
 }
 
-/* M v, where the columns of M are col[j] = M(1 << j) */
-static uint16_t dms_apply(const uint16_t col[16], uint16_t v)
+
+/* ---------- encrypted archives ----------
+ * The DMS "encryption": plain = cipher ^ (uint8_t)k; k = (uint16_t)((k >> 1) + cipher). The key k runs through the packed
+ * data of every track of the archive in file order, track 80 (the file description) excepted; the CRC of the packed data
+ * is the one of the encrypted bytes, the checksum the one of the unpacked data. The initial k (a 16-bit hash of the
+ * password) only changes the first ~20 bytes decrypted: after them k depends only on the last bytes of cipher text. So a
+ * banner, or any block before the first disk track, synchronizes the key, and an archive that begins with disk data needs
+ * the 65536 keys tried for its first track only. */
+
+static uint16_t dms_key_advance(uint16_t k, const uint8_t *in, size_t n)
 {
-    uint16_t r = 0;
-    unsigned q;
-    for (q = 0; q < 16; q++) if ((v >> q) & 1u) r ^= col[q];
-    return r;
+    while (n--) k = (uint16_t)((k >> 1) + *in++);
+    return k;
 }
 
-/* trial: unpack `cand` (pklen1 bytes) from the state xs (x is left as the unpack made it); true if the track
- * checksum is the expected one */
-/* The search for repairs is bounded: by a number of trial unpacks and by time, so that opening a damaged archive in
- * the panel does not take for ever. Raise DMS_REPAIR_SECONDS to search longer. */
-#ifndef DMS_REPAIR_SECONDS
-#  define DMS_REPAIR_SECONDS 6
-#endif
-static long g_dms_budget;                              /* trial unpacks left for this archive */
-static clock_t g_dms_deadline;
-static bool g_dms_budget_hit;
+
+
+static void dms_decrypt(uint8_t *out, const uint8_t *in, size_t n, uint16_t k)
+{
+    while (n--) {
+        uint8_t c = *in++;
+        *out++ = (uint8_t)(c ^ (uint8_t)k);
+        k = (uint16_t)((k >> 1) + c);
+    }
+}
+
+
+/* One attempt, in the reading `var` (DMS_V_*): the packed data (decrypted if the archive is encrypted) is unpacked into b2. */
+
+static int dms_attempt(dms_trk_t *t, const uint8_t *packed, size_t len, unsigned var, dms_out_t *o)
+{
+    if (t->enc) dms_decrypt(t->b1, packed, len, t->k0);
+    else memcpy(t->b1, packed, len);
+    t->x->noclip = (var & DMS_V_NOCLIP) != 0;
+    t->x->ptab_alt = (var & DMS_V_PTAB_ALT) != 0;
+    return dms_unpack_track(t->x, t->b1, len, t->b2, (uint16_t)t->pklen2, (uint16_t)t->unpklen, (uint8_t)t->cmode,
+                            (uint8_t)t->flags, o);
+}
+
+
+/* Unpacks `packed` (len bytes) and compares the checksum. The attempts, in this order, stop at the first whose checksum is
+ * right: the dictionary as it is, in the default reading of the data and, for a HEAVY track that had to tolerate a last
+ * match past the end or an incomplete table of distances, in the other readings (DMS_V_*); then, with an uncertain
+ * dictionary, the same from an empty dictionary. *r_out: result of the attempt whose output is left in b2 (0 decoded, 1
+ * damaged data: b2 holds what could be decoded, 2 unknown method). *retry_ok: the right attempt started from an empty
+ * dictionary. When none is right b2 and the state are those of the first attempt (unless only a later one decoded
+ * cleanly) and the state is the one left by that attempt. */
+
+static bool dms_decode_verify(dms_trk_t *t, const uint8_t *packed, size_t len, int *r_out, bool *retry_ok)
+{
+    const bool stateful = t->cmode >= 2, heavy = t->cmode >= 5;
+    const unsigned nplan = (stateful && t->unsure) ? 2 : 1;
+    const bool snap = stateful && (nplan > 1 || heavy);        /* the attempts start from the same state */
+    bool ok = false, have = false;
+    int r = 0, best_r = 0;
+    size_t best_got = 0;
+    unsigned best_q = 0, pi;
+    long best_unread = 0;
+
+    *retry_ok = false;
+    if (snap) memcpy(t->xs, t->x, sizeof(*t->x));
+    for (pi = 0; pi < nplan && !ok && r != 2; pi++) {
+        unsigned list[4] = { 0, 0, 0, 0 }, n = 1, i;
+        for (i = 0; i < n && !ok; i++) {
+            dms_out_t o;
+            if (snap && (pi > 0 || i > 0)) {
+                memcpy(t->x, t->xs, sizeof(*t->x));
+                if (pi > 0) dms_init_decrunchers(t->x);        /* the encoder may have reset the dictionary */
+            }
+            r = dms_attempt(t, packed, len, list[i], &o);
+            if (r == 0 && dms_checksum(t->b2, t->unpklen) == t->usum) {
+                ok = true;
+                *retry_ok = pi > 0;
+                t->got = o.got;
+                t->quirks = o.quirks;
+                t->unread = o.unread;
+                break;
+            }
+            if (!have || (best_r != 0 && r == 0)) {            /* what is kept if no attempt is right */
+                have = true;
+                best_r = r;
+                best_got = o.got;
+                best_q = o.quirks;
+                best_unread = o.unread;
+                if (snap) {
+                    memcpy(t->keep, t->b2, t->unpklen);
+                    memcpy(t->xp, t->x, sizeof(*t->x));
+                }
+            }
+            if (r == 2) break;                                 /* unknown method: no other reading helps */
+            if (heavy && list[i] == 0) {                       /* the other readings that the tolerance of this one calls for */
+                unsigned want = 0;
+                if (o.quirks & DMS_Q_MATCH_CLIP) want |= DMS_V_NOCLIP;
+                if (o.quirks & DMS_Q_PTAB) want |= DMS_V_PTAB_ALT;
+                if (want & DMS_V_NOCLIP) list[n++] = DMS_V_NOCLIP;
+                if (want & DMS_V_PTAB_ALT) list[n++] = DMS_V_PTAB_ALT;
+                if (want == (DMS_V_NOCLIP | DMS_V_PTAB_ALT)) list[n++] = want;
+            }
+        }
+    }
+    if (!ok) {
+        if (snap && have) {
+            memcpy(t->b2, t->keep, t->unpklen);
+            memcpy(t->x, t->xp, sizeof(*t->x));
+        }
+        t->got = best_got;
+        t->quirks = best_q;
+        t->unread = best_unread;
+        r = best_r;
+    } else {
+        r = 0;
+    }
+    *r_out = r;
+    return ok;
+}
+
+
+/* A DOS boot block names its root block (880 on a DD disk, 1760 on an HD one) in bytes 8 to 11 */
+static bool dms_boot_plausible(const uint8_t *b, size_t n)
+{
+    uint32_t root;
+    if (n < 12) return false;
+    root = ((uint32_t)b[8] << 24) | ((uint32_t)b[9] << 16) | ((uint32_t)b[10] << 8) | b[11];
+    return root == 880 || root == 1760;
+}
+
+/* The key of the first disk track of an encrypted archive (decoded from an empty dictionary, so the state of the
+ * decompressor is reset for every key): the one that makes the checksum of the unpacked data right. Phase 1, for track 0:
+ * a cheap probe decodes just the first bytes of every candidate and only the keys whose boot block starts with "DOS" are
+ * decoded completely. Phase 2: every key, completely. The search stops after DMS_KEY_SECONDS. Returns true if found
+ * (t->k0 = the key; b2, the state and *r, *retry_ok are those of the right decode).
+ * A key changes only the first ~20 bytes of the track, and NOCOMP and SIMPLE accept any stream, so for them the checksum
+ * is a weak validation criterion: the search goes on through all the keys and counts those that fit. If more than one fits, the one whose
+ * boot block names a root block (dms_boot_plausible) is taken when it is the only one; otherwise the first is taken and
+ * t->ambiguous says that the key is not certain. The other modes reject nearly every wrong key: the first that fits is
+ * taken. A key that gives the right checksum but not the end of the packed data is kept only if no other key fits
+ * ("better than none": the data may be damaged at their end), and t->weakkey says that it is not verified: a search
+ * through 65536 keys finds about one such key by chance even when the right one is not among them. */
+
+static bool g_dms_key_hit;                             /* the time limit stopped the search for a key */
+
+static bool dms_find_key(dms_trk_t *t, const uint8_t *stored, size_t len, unsigned number, int *r, bool *retry_ok)
+{
+    const size_t probe_len = len < 512 ? len : 512;
+    const bool unsure = t->unsure;
+    const bool weakmode = t->cmode <= 1;
+    const clock_t limit = clock() + (clock_t)DMS_KEY_SECONDS * CLOCKS_PER_SEC;
+    unsigned key, n_match = 0, n_plaus = 0;
+    long first = -1, first_plaus = -1;             /* the first key that fits, the first one that fits and names a root */
+    long weak = -1;                                /* first key with the right checksum that does not end with the data */
+    bool found = false;
+
+    t->enc = true;
+    t->unsure = false;
+    t->ambiguous = false;
+    t->weakkey = false;
+    if (number == 0 && t->cmode <= 6) {
+        for (key = 0; key < 65536 && !found; key++) {
+            dms_out_t o;
+            if ((key & 255) == 0 && clock() > limit) { g_dms_key_hit = true; break; }
+            dms_decrypt(t->b1, stored, probe_len, (uint16_t)key);
+            dms_init_decrunchers(t->x);
+            if (dms_unpack_track(t->x, t->b1, probe_len, t->b2, 16, 3, (uint8_t)t->cmode, (uint8_t)t->flags, &o) == 2)
+                break;
+            if (o.got < 3 || t->b2[0] != 'D' || t->b2[1] != 'O' || t->b2[2] != 'S') continue;
+            dms_init_decrunchers(t->x);
+            t->k0 = (uint16_t)key;
+            if (!dms_decode_verify(t, stored, len, r, retry_ok)) continue;
+            if (!weakmode) { found = true; continue; }
+            n_match++;
+            if (first < 0) first = key;
+            if (dms_boot_plausible(t->b2, t->unpklen)) {
+                n_plaus++;
+                if (first_plaus < 0) first_plaus = key;
+            }
+        }
+    }
+    if (!found && n_match == 0) {
+        for (key = 0; key < 65536 && !found; key++) {
+            if ((key & 255) == 0 && clock() > limit) { g_dms_key_hit = true; break; }
+            dms_init_decrunchers(t->x);
+            t->k0 = (uint16_t)key;
+            if (dms_decode_verify(t, stored, len, r, retry_ok)) {
+                /* a wrong key matches the 16-bit checksum with probability 2^-16, i.e. about once in a search; the
+                 * data decoded with the right key also ends where the packed data ends */
+                if (t->cmode == 0 || dms_tail_ok(t->unread)) {
+                    if (!weakmode) { found = true; continue; }
+                    n_match++;
+                    if (first < 0) first = key;
+                    if (dms_boot_plausible(t->b2, t->unpklen)) {
+                        n_plaus++;
+                        if (first_plaus < 0) first_plaus = key;
+                    }
+                } else if (weak < 0) {
+                    weak = (long)key;
+                }
+            }
+            if (*r == 2) break;                    /* unknown method: no key can help */
+        }
+    }
+    if (!found && n_match > 0) {                   /* NOCOMP, SIMPLE: choose among the keys that fit */
+        const long pick = (n_plaus == 1 || (n_match > 1 && first_plaus >= 0)) ? first_plaus : first;
+        t->ambiguous = n_match > 1 && n_plaus != 1;
+        dms_init_decrunchers(t->x);                /* decode again with the key: the scan went on past it */
+        t->k0 = (uint16_t)pick;
+        found = dms_decode_verify(t, stored, len, r, retry_ok);
+    }
+    if (!found && weak >= 0) {                     /* only a key that does not end with the data: better than none */
+        dms_init_decrunchers(t->x);
+        t->k0 = (uint16_t)weak;
+        found = dms_decode_verify(t, stored, len, r, retry_ok);
+        t->weakkey = found;
+    }
+    t->unsure = unsure;
+    return found;
+}
+
+
+/* ---------- repair of the packed data of a track ----------
+ * The search for repairs is bounded by a number of candidate decodes and by time, so that opening a damaged archive in the
+ * panel does not take for ever. */
+static long g_dms_budget;                              /* Remaining candidate decodes allowed for this archive. */
+static clock_t g_dms_rep_spent;                        /* time that the repairs of this archive have used so far */
+static clock_t g_dms_rep_t0;                           /* when the repair that is running began */
+static unsigned g_dms_ticks;                           /* calls of dms_budget_over: the clock is read every 64th */
+static bool g_dms_budget_hit;                          /* a search was stopped by the limit */
+
+/* The time used by the repairs. The search for a key, the unpacking of the tracks that need no repair and the rest of the
+ * work are not counted: DMS_REPAIR_SECONDS is the time of the repairs, as the manual says, and the key has a limit of its own. */
+static clock_t dms_rep_clock(void)
+{
+    return g_dms_rep_spent + (clock() - g_dms_rep_t0);
+}
 
 static bool dms_budget_over(void)
 {
-    if (g_dms_budget > 0 && ((g_dms_budget & 63) != 0 || clock() < g_dms_deadline)) return false;
-    g_dms_budget_hit = true;
-    g_dms_budget = 0;
-    return true;
-}
-
-static bool dms_trial(dms_ctx_t *x, const dms_ctx_t *xs, const uint8_t *cand, size_t pklen1, uint8_t *b1, uint8_t *b2,
-                      uint16_t pklen2, uint16_t unpklen, uint8_t cmode, uint8_t flags, uint16_t usum)
-{
-    int r;
-    g_dms_budget--;
-    *x = *xs;
-    memcpy(b1, cand, pklen1);
-    r = dms_unpack_track(x, b1, pklen1, b2, pklen2, unpklen, cmode, flags);
-    return (r == 0 || r == 3) && dms_checksum(b2, unpklen) == usum;      /* the caller restores x from xs */
-}
-
-/* substitution (burst of at most 16 bits). `orig` has pklen1 bytes; on success the fixed data are in `fixed` */
-static bool dms_fix_burst(dms_ctx_t *x, const dms_ctx_t *xs, const uint8_t *orig, size_t pklen1, uint16_t dcrc,
-                          uint8_t *fixed, uint8_t *b1, uint8_t *b2, uint16_t pklen2, uint16_t unpklen,
-                          uint8_t cmode, uint8_t flags, uint16_t usum, size_t *rpos)
-{
-    uint16_t delta = (uint16_t)(dms_crc16(orig, pklen1) ^ dcrc);
-    uint16_t z0[8], z1[8], z2[8];
-    unsigned tries = 0, j, t;
-    size_t p;
-
-    if (pklen1 == 0 || delta == 0) return false;
-    memcpy(fixed, orig, pklen1);                                /* the candidates are applied to `fixed` and undone */
-    for (j = 0; j < 8; j++) { z0[j] = dms_crc_tab_at(1u << j); z1[j] = z2[j] = 0; }
-    for (p = pklen1; p-- > 0; ) {
-        /* z0: effect of an error byte at p (followed by n-1-p zero bytes); z1 at p+1; z2 at p+2 */
-        for (t = 0; t < 8; t++) {
-            uint16_t bv[16], bm[16], c[16], v, w = 0;
-            unsigned bit, m;
-            uint32_t E;
-            bool ok = true, tr;
-            uint8_t eb[3];
-
-            for (j = 0; j < 16; j++) {
-                E = (uint32_t)1u << (j + (8 - t));
-                c[j] = (uint16_t)(dms_zval(z0, (E >> 16) & 255) ^ dms_zval(z1, (E >> 8) & 255) ^
-                                  dms_zval(z2, E & 255));
-            }
-            memset(bv, 0, sizeof(bv));
-            memset(bm, 0, sizeof(bm));
-            for (j = 0; j < 16; j++) {
-                v = c[j];
-                m = 1u << j;
-                for (bit = 16; bit-- > 0; ) {
-                    if (!((v >> bit) & 1u)) continue;
-                    if (bv[bit]) { v ^= bv[bit]; m ^= bm[bit]; }
-                    else { bv[bit] = v; bm[bit] = (uint16_t)m; break; }
-                }
-            }
-            v = delta;
-            for (bit = 16; bit-- > 0; ) {
-                if (!((v >> bit) & 1u)) continue;
-                if (!bv[bit]) { ok = false; break; }
-                v ^= bv[bit];
-                w ^= bm[bit];
-            }
-            if (!ok || v != 0 || !(w & 0x8000u)) continue;     /* the burst starts at its top bit: counted once */
-            E = (uint32_t)w << (8 - t);
-            eb[0] = (uint8_t)(E >> 16);
-            eb[1] = (uint8_t)(E >> 8);
-            eb[2] = (uint8_t)E;
-            if (p + 1 >= pklen1 && eb[1]) continue;
-            if (p + 2 >= pklen1 && eb[2]) continue;
-            if (tries++ >= DMS_REPAIR_MAX_TRIES || dms_budget_over()) return false;
-            /* the CRC is right by construction (the pattern was solved from it): no CRC check here */
-            fixed[p] ^= eb[0];
-            if (p + 1 < pklen1) fixed[p + 1] ^= eb[1];
-            if (p + 2 < pklen1) fixed[p + 2] ^= eb[2];
-            tr = dms_trial(x, xs, fixed, pklen1, b1, b2, pklen2, unpklen, cmode, flags, usum);
-            if (tr && dms_crc16(fixed, pklen1) == dcrc) { *rpos = p; return true; }
-            fixed[p] ^= eb[0];                                   /* undo */
-            if (p + 1 < pklen1) fixed[p + 1] ^= eb[1];
-            if (p + 2 < pklen1) fixed[p + 2] ^= eb[2];
-        }
-        memcpy(z2, z1, sizeof(z2));
-        memcpy(z1, z0, sizeof(z1));
-        for (j = 0; j < 8; j++) z0[j] = dms_crc_L(z0[j]);
+    if (g_dms_budget_hit) return true;
+    if (g_dms_budget <= 0 || ((++g_dms_ticks & 63u) == 0 &&
+                              dms_rep_clock() >= (clock_t)DMS_REPAIR_SECONDS * CLOCKS_PER_SEC)) {
+        g_dms_budget_hit = true;
+        return true;
     }
     return false;
 }
 
-/* substitution: TWO flipped bits anywhere in the track (CRC meet-in-the-middle: a hash of the CRC effect of every
- * bit, then for each bit the partner whose effect completes the CRC difference) */
-static bool dms_fix_twobits(dms_ctx_t *x, const dms_ctx_t *xs, const uint8_t *orig, size_t pklen1, uint16_t dcrc,
-                            uint8_t *fixed, uint8_t *b1, uint8_t *b2, uint16_t pklen2, uint16_t unpklen,
-                            uint8_t cmode, uint8_t flags, uint16_t usum, size_t *rpos)
+/* Decode a repair candidate (counted against the budget); return true if the unpacked track has the expected checksum. */
+static bool dms_trial(dms_trk_t *t, const uint8_t *cand, size_t len, bool *retry_ok)
 {
-    uint16_t delta = (uint16_t)(dms_crc16(orig, pklen1) ^ dcrc);
-    size_t nb = pklen1 * 8, i, p;
-    uint16_t *c;
-    int32_t *head, *next;
-    uint16_t zb[8];
-    unsigned j, tries = 0;
+    int r;
+    g_dms_budget--;
+    return dms_decode_verify(t, cand, len, &r, retry_ok);
+}
+
+#define DMS_REPAIR_INS_MAX 16384     /* longest track for the search of a missing byte of any value */
+
+/* CRC16 is linear: with M = "process a zero byte", crc(P v S) from state 0 is
+ *   M^(|S|+1) crc(P)  ^  M^(|S|) tab[v]  ^  crc(S)
+ * so the CRC of all the (position, value) insertions is found without reprocessing the data. */
+static uint16_t dms_crc_m(uint16_t s) { return (uint16_t)(g_dms_crc[0][s & 255] ^ (s >> 8)); }
+
+/* B x, where the columns of B are B[i] = B (1 << i) */
+static uint16_t dms_crc_apply(const uint16_t *B, uint16_t x)
+{
+    uint16_t r = 0;
+    int i;
+    for (i = 0; i < 16; i++) if (x & (1u << i)) r ^= B[i];
+    return r;
+}
+
+/* One byte lost: every insertion whose CRC equals dcrc is unpacked and accepted only if the checksum of the unpacked
+ * data is right too. Values equal to a neighbour (a run made longer) were tried by dms_repair_track already. */
+static bool dms_repair_insert_any(dms_trk_t *t, const uint8_t *src, size_t L, size_t pklen1, uint16_t dcrc,
+                                  bool *retry_ok, size_t *at, uint8_t *val)
+{
+    uint16_t *pre, B[16], G = 0;
+    size_t k;
+    int i;
     bool found = false;
 
-    if (pklen1 == 0 || delta == 0 || pklen1 > 8192) return false;
-    c = (uint16_t *)xmalloc(nb * sizeof(uint16_t));
-    next = (int32_t *)xmalloc(nb * sizeof(int32_t));
-    head = (int32_t *)xmalloc(65536 * sizeof(int32_t));
-    for (i = 0; i < 65536; i++) head[i] = -1;
-    for (j = 0; j < 8; j++) zb[j] = dms_crc_tab_at(1u << j);
-    for (p = pklen1; p-- > 0; ) {
-        for (j = 0; j < 8; j++) {
-            size_t pos = p * 8 + j;
-            c[pos] = zb[j];
-            next[pos] = head[zb[j]];
-            head[zb[j]] = (int32_t)pos;
-            zb[j] = dms_crc_L(zb[j]);
-        }
-    }
-    memcpy(fixed, orig, pklen1);
-    for (i = 0; i < nb && !found; i++) {
-        int32_t q;
-        for (q = head[(uint16_t)(delta ^ c[i])]; q >= 0; q = next[q]) {
-            size_t pa = i / 8, pb = (size_t)q / 8;
-            uint8_t ma = (uint8_t)(1u << (i % 8)), mb = (uint8_t)(1u << ((size_t)q % 8));
-            if ((size_t)q <= i) continue;
-            if (tries++ >= DMS_REPAIR_MAX_TRIES || dms_budget_over()) goto done;
-            fixed[pa] ^= ma;                                     /* the CRC is right by construction */
-            fixed[pb] ^= mb;
-            if (dms_trial(x, xs, fixed, pklen1, b1, b2, pklen2, unpklen, cmode, flags, usum) &&
-                dms_crc16(fixed, pklen1) == dcrc) {
-                *rpos = pa;
+    pre = (uint16_t *)xmalloc((L + 1) * sizeof(uint16_t));
+    pre[0] = 0;
+    for (k = 0; k < L; k++) pre[k + 1] = (uint16_t)(g_dms_crc[0][(pre[k] ^ src[k]) & 255] ^ (pre[k] >> 8));
+    for (i = 0; i < 16; i++) B[i] = (uint16_t)(1u << i);                  /* B = M^(L-k) for k = L */
+    for (k = L + 1; k-- > 0;) {                                         /* k = L ... 0; G = crc(src[k..L)) */
+        uint16_t A;
+        unsigned v;
+        if (dms_budget_over()) break;
+        A = (uint16_t)(dms_crc_m(dms_crc_apply(B, pre[k])) ^ G);
+        for (v = 0; v < 256; v++) {
+            if ((uint16_t)(A ^ dms_crc_apply(B, g_dms_crc[0][v])) != dcrc) continue;
+            if (k < L && v == src[k]) continue;                           /* run made longer: tried before */
+            if (k > 0 && v == src[k - 1]) continue;
+            if (dms_budget_over()) break;
+            memcpy(t->cand, src, k);
+            t->cand[k] = (uint8_t)v;
+            memcpy(t->cand + k + 1, src + k, L - k);
+            if (dms_trial(t, t->cand, pklen1, retry_ok)) {
+                *at = k;
+                *val = (uint8_t)v;
                 found = true;
                 break;
             }
-            fixed[pa] ^= ma;                                     /* undo */
-            fixed[pb] ^= mb;
+            memcpy(t->x, t->xr, sizeof(*t->x));
         }
+        if (found || k == 0) break;
+        G = (uint16_t)(dms_crc_apply(B, g_dms_crc[0][src[k - 1]]) ^ G);     /* crc(src[k-1..L)) */
+        for (i = 0; i < 16; i++) B[i] = dms_crc_m(B[i]);                 /* M^(L-k+1) */
     }
-done:
-    free(c);
+    free(pre);
+    return found;
+}
+
+/* One byte of the right length replaced by another value (the length of the track is as declared): same linear
+ * computation. For the byte at k the CRC of the data with the value v is
+ *   M^(L-k) crc(src[0..k))  ^  M^(L-k-1) tab[v]  ^  crc(src[k+1..L)) */
+static bool dms_repair_subst(dms_trk_t *t, const uint8_t *src, size_t L, uint16_t dcrc, bool *retry_ok, size_t *at,
+                             uint8_t *val)
+{
+    uint16_t *pre, B[16], G = 0;
+    size_t k;
+    int i;
+    bool found = false;
+
+    pre = (uint16_t *)xmalloc((L + 1) * sizeof(uint16_t));
+    pre[0] = 0;
+    for (k = 0; k < L; k++) pre[k + 1] = (uint16_t)(g_dms_crc[0][(pre[k] ^ src[k]) & 255] ^ (pre[k] >> 8));
+    for (i = 0; i < 16; i++) B[i] = (uint16_t)(1u << i);                  /* B = M^(L-k-1), k = L-1: M^0 */
+    for (k = L; k-- > 0;) {                                             /* G = crc(src[k+1..L)) */
+        uint16_t A;
+        unsigned v;
+        if (dms_budget_over()) break;
+        A = (uint16_t)(dms_crc_m(dms_crc_apply(B, pre[k])) ^ G);
+        for (v = 0; v < 256; v++) {
+            if (v == src[k]) continue;
+            if ((uint16_t)(A ^ dms_crc_apply(B, g_dms_crc[0][v])) != dcrc) continue;
+            if (dms_budget_over()) break;
+            memcpy(t->cand, src, L);
+            t->cand[k] = (uint8_t)v;
+            if (dms_trial(t, t->cand, L, retry_ok)) {
+                *at = k;
+                *val = (uint8_t)v;
+                found = true;
+                break;
+            }
+            memcpy(t->x, t->xr, sizeof(*t->x));
+        }
+        if (found) break;
+        G = (uint16_t)(dms_crc_apply(B, g_dms_crc[0][src[k]]) ^ G);         /* crc(src[k..L)) */
+        for (i = 0; i < 16; i++) B[i] = dms_crc_m(B[i]);
+    }
+    free(pre);
+    return found;
+}
+
+/* ---------- repair of several wrong bits ----------
+ * The packed data have the declared length and no single wrong byte explains the CRC: the damage may be a few wrong
+ * bits. The CRC16 is linear, so the difference between the CRC of the data and the one in the track header (the
+ * syndrome) is the CRC of the pattern of wrong bits, and the pattern can be solved for instead of searched:
+ *   - a burst of at most 16 bits: for every bit where it can start there is exactly one 16-bit pattern with that
+ *     syndrome (moving the start one bit on multiplies the pattern by x, one bit of the CRC register); a pattern
+ *     begins with a wrong bit, so every burst is found once;
+ *   - two wrong bits more than 15 bits apart: the syndromes of all the bits go into hash chains, and the partner of
+ *     a bit is the bit whose syndrome completes the difference.
+ * Every candidate has the right CRC by construction and is unpacked. It passes if the checksum of the unpacked track is
+ * right and, in the modes with a dictionary, the unpacked data end where the packed data end (a stream that went out
+ * of step does not). The checksum is a sum of bytes, so several candidates can pass (the changes of two literals that
+ * cancel, a copy of the same bytes from another place); therefore the candidates are tried in classes, the ones that
+ * flip the fewest bits first (bursts of 2 to 8 wrong bits, pairs of far bits, bursts of 9 to 16), and a class gives a
+ * correction only if exactly one of its candidates passes. NOCOMP and SIMPLE accept any stream and keep the weak
+ * checksum alone: there a correction is taken only if it is the only one of all the candidates that passes.
+ * When the track unpacked as it is still ends where the packed data end (the damage is in the bits of literals and
+ * does not put the stream out of step) the checksum cannot choose between many candidates, and only bursts of up to
+ * DMS_QUIET_WEIGHT wrong bits are tried.
+ * The search is bounded: a track gets DMS_BITS_TRIALS candidate decodes (a class that exceeds the budget is skipped) and
+ * DMS_BITS_SECONDS, and the whole-archive search gets half of the repair time and candidate-decode budget, so
+ * that a track that cannot be repaired does not take all of it and the repairs of one byte are never starved. */
+static bool g_dms_bits_hit;                            /* the search of wrong bits was stopped by the limit of the archive */
+static bool g_dms_bits_cut;                            /* a class of candidates exceeded the per-track decode or time limit */
+static unsigned g_dms_bits_ticks;
+
+static bool dms_bits_over(void)
+{
+    if (g_dms_bits_hit || dms_budget_over()) return true;
+    if (g_dms_budget <= DMS_REPAIR_BUDGET / 2 ||
+        ((++g_dms_bits_ticks & 63u) == 0 && dms_rep_clock() >= (clock_t)DMS_REPAIR_SECONDS * CLOCKS_PER_SEC / 2)) {
+        g_dms_bits_hit = true;
+        return true;
+    }
+    return false;
+}
+
+typedef struct { size_t pos[3]; uint8_t mask[3]; unsigned n; int kind; } dms_flips_t;
+
+static uint16_t dms_crc_x(uint16_t c)              /* times x: one bit of zero data through the CRC register */
+{
+    return (uint16_t)((c >> 1) ^ ((c & 1u) ? 0xA001u : 0u));
+}
+
+static uint16_t dms_crc_xinv(uint16_t c)           /* the inverse of dms_crc_x */
+{
+    return (c & 0x8000u) ? (uint16_t)(((c ^ 0xA001u) << 1) | 1u) : (uint16_t)(c << 1);
+}
+
+static unsigned dms_popcount16(unsigned v)
+{
+    unsigned n = 0;
+    for (; v; v &= v - 1u) n++;
+    return n;
+}
+
+static void dms_flip(uint8_t *buf, const dms_flips_t *f)
+{
+    unsigned i;
+    for (i = 0; i < f->n; i++) buf[f->pos[i]] ^= f->mask[i];
+}
+
+static unsigned dms_flips_bits(const dms_flips_t *f)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < f->n; i++) n += dms_popcount16(f->mask[i]);
+    return n;
+}
+
+/* The bits of the burst that starts at bit i0 with the 16-bit pattern r (bit j of r is bit i0 + j of the data) */
+static void dms_burst_flips(dms_flips_t *f, size_t i0, uint16_t r)
+{
+    uint8_t m[3] = { 0, 0, 0 };
+    unsigned j;
+    memset(f, 0, sizeof(*f));
+    f->kind = 5;
+    for (j = 0; j < 16; j++)
+        if ((r >> j) & 1u) {
+            const unsigned b = (unsigned)(i0 & 7u) + j;
+            m[b >> 3] = (uint8_t)(m[b >> 3] | (1u << (b & 7u)));
+        }
+    for (j = 0; j < 3; j++)
+        if (m[j]) { f->pos[f->n] = (i0 >> 3) + j; f->mask[f->n] = m[j]; f->n++; }
+}
+
+/* The search in one track */
+typedef struct {
+    dms_trk_t   *t;
+    size_t       L;
+    bool        *retry_ok;
+    bool         weak;                 /* NOCOMP, SIMPLE: one correction among all the candidates */
+    unsigned     trials;               /* Remaining candidate decodes allowed for this track. */
+    unsigned     ticks;
+    clock_t      deadline;             /* end of the time of this track */
+    unsigned     passed;               /* candidates that passed in the class (weak modes: in all of them) */
+    bool         skipped;              /* a class exceeded the per-track candidate-decode budget and was skipped */
+    dms_flips_t  hit;                  /* the first that passed */
+} dms_multi_t;
+
+/* Tries one candidate; the candidate and the decompressor are put back afterwards. False when the search must stop: a
+ * limit, or a second candidate that passes in a weak mode */
+static bool dms_multi_try(dms_multi_t *m, const dms_flips_t *f)
+{
+    dms_trk_t *t = m->t;
+    bool pass;
+    if (dms_bits_over()) return false;
+    if ((++m->ticks & 63u) == 0 && clock() >= m->deadline) { g_dms_bits_cut = true; return false; }
+    m->trials--;
+    dms_flip(t->cand, f);
+    pass = dms_trial(t, t->cand, m->L, m->retry_ok) && (m->weak || dms_tail_ok(t->unread));
+    dms_flip(t->cand, f);
+    if (t->cmode >= 2) memcpy(t->x, t->xr, sizeof(*t->x));
+    if (!pass) return true;
+    if (m->passed++ == 0) m->hit = *f;
+    return !m->weak || m->passed < 2;
+}
+
+/* The bursts of w wrong bits that touch two bytes or more (the ones inside a byte were tried by the search for a wrong
+ * byte): counted when `count` is set, otherwise evaluated. Returns their number; *go is cleared when a candidate decode hits the limit */
+static size_t dms_multi_burst_pass(dms_multi_t *m, uint16_t syn, unsigned w, bool count, bool *go)
+{
+    const size_t nbits = m->L * 8;
+    size_t i0, n = 0;
+    uint16_t r = syn;
+    for (i0 = 0; i0 < nbits; i0++) r = dms_crc_xinv(r);              /* the pattern of the burst that starts at bit 0 */
+    for (i0 = 0; i0 + 1 < nbits; i0++, r = dms_crc_x(r)) {
+        unsigned hi;
+        dms_flips_t f;
+        if (!(r & 1u) || dms_popcount16(r) != w) continue;
+        if (nbits - i0 < 16 && (r >> (nbits - i0)) != 0) continue;         /* the pattern goes past the end */
+        for (hi = 15; !((r >> hi) & 1u); hi--) { }
+        if ((unsigned)(i0 & 7u) + hi < 8u) continue;                        /* inside one byte */
+        n++;
+        if (count) continue;
+        dms_burst_flips(&f, i0, r);
+        if (!dms_multi_try(m, &f)) { *go = false; return n; }
+    }
+    return n;
+}
+
+/* The bursts of wlo..whi wrong bits, one weight at a time. 1: a correction, 0: none, -1: ambiguous or stopped. A class
+ * that exceeds the remaining per-track candidate-decode budget is skipped (m->skipped): a correction found after that
+ * has not been compared with all the candidates that flip fewer bits, and the caller says so */
+static int dms_multi_bursts(dms_multi_t *m, uint16_t syn, unsigned wlo, unsigned whi)
+{
+    unsigned w;
+    for (w = wlo; w <= whi; w++) {
+        bool go = true;
+        if (!m->weak) m->passed = 0;
+        if (dms_multi_burst_pass(m, syn, w, true, &go) > m->trials) {
+            g_dms_bits_cut = true;
+            m->skipped = true;
+            if (m->weak) return -1;
+            continue;
+        }
+        dms_multi_burst_pass(m, syn, w, false, &go);
+        if (!go) return -1;
+        if (!m->weak && m->passed) return m->passed == 1 ? 1 : -1;
+    }
+    return 0;
+}
+
+/* The pairs of wrong bits more than 15 bits apart: same results as dms_multi_bursts */
+static int dms_multi_pairs(dms_multi_t *m, uint16_t syn)
+{
+    const size_t nbits = m->L * 8;
+    uint16_t c = 0xA001u;                          /* the syndrome of the last bit of the data */
+    uint16_t *syd = (uint16_t *)xmalloc(nbits * sizeof(uint16_t));
+    int32_t *next = (int32_t *)xmalloc(nbits * sizeof(int32_t)), *head = (int32_t *)xmalloc(65536 * sizeof(int32_t));
+    size_t i, n = 0;
+    int rc = 0;
+
+    for (i = 0; i < 65536; i++) head[i] = -1;
+    for (i = nbits; i-- > 0;) {
+        syd[i] = c;
+        next[i] = head[c];
+        head[c] = (int32_t)i;
+        c = dms_crc_x(c);
+    }
+    for (i = 0; i < nbits; i++) {
+        int32_t q;
+        for (q = head[(uint16_t)(syn ^ syd[i])]; q >= 0; q = next[q])
+            if ((size_t)q >= i + 16) n++;
+    }
+    if (n > m->trials) {
+        g_dms_bits_cut = true;
+        m->skipped = true;
+        rc = m->weak ? -1 : 0;
+    } else {
+        if (!m->weak) m->passed = 0;
+        for (i = 0; i < nbits && rc == 0; i++) {
+            int32_t q;
+            for (q = head[(uint16_t)(syn ^ syd[i])]; q >= 0; q = next[q]) {
+                dms_flips_t f;
+                if ((size_t)q < i + 16) continue;      /* closer than that: a burst */
+                memset(&f, 0, sizeof(f));
+                f.n = 2;
+                f.kind = 6;
+                f.pos[0] = i >> 3;           f.mask[0] = (uint8_t)(1u << (i & 7u));
+                f.pos[1] = (size_t)q >> 3;   f.mask[1] = (uint8_t)(1u << ((size_t)q & 7u));
+                if (!dms_multi_try(m, &f)) { rc = -1; break; }
+            }
+        }
+        if (rc == 0 && !m->weak && m->passed) rc = m->passed == 1 ? 1 : -1;
+    }
+    free(syd);
     free(next);
     free(head);
-    return found;
+    return rc;
 }
 
-/* one byte lost: `reg` has reglen = pklen1 - 1 bytes. A byte e is inserted at position p (0..reglen) */
-static bool dms_fix_lost(dms_ctx_t *x, const dms_ctx_t *xs, const uint8_t *reg, size_t reglen, uint16_t dcrc,
-                         uint8_t *fixed, uint8_t *b1, uint8_t *b2, uint16_t pklen2, uint16_t unpklen,
-                         uint8_t cmode, uint8_t flags, uint16_t usum, size_t *rpos)
+/* Returns true on success: t->cand holds the repaired data, b2 and the state are those of the right decode; *what = 5
+ * a burst, 6 two bits; *at the byte of the first wrong bit; *val the number of wrong bits. t->loud says whether the
+ * data unpacked as they are lost the end of the packed data. t->rep_skipped tells that the correction was found after a
+ * class of candidates with fewer wrong bits had been skipped: it is then a correction that nothing contradicts, not
+ * the one that the order of the classes would have given. */
+static bool dms_repair_multi(dms_trk_t *t, const uint8_t *src, size_t L, uint16_t dcrc, bool *retry_ok, int *what,
+                             size_t *at, uint8_t *val)
 {
-    size_t pklen1 = reglen + 1, p, i;
-    uint16_t *P = (uint16_t *)xmalloc((reglen + 1) * sizeof(uint16_t));    /* P[p]: CRC state after reg[0..p) */
-    uint16_t col[16], total, s;
-    unsigned tries = 0, j, e;
-    bool found = false;
+    const uint16_t syn = (uint16_t)(dms_crc16(src, L) ^ dcrc);
+    const bool all = t->loud || t->cmode <= 1;
+    dms_multi_t m;
+    int rc;
 
-    s = 0;
-    for (p = 0; p <= reglen; p++) {
-        P[p] = s;
-        if (p < reglen) s = (uint16_t)(dms_crc_L(s) ^ dms_crc_tab_at(reg[p]));
+    t->rep_skipped = false;
+    if (syn == 0 || L < 3 || L > DMS_REPAIR_INS_MAX) return false;
+    memcpy(t->cand, src, L);
+    memset(&m, 0, sizeof(m));
+    m.t = t;
+    m.L = L;
+    m.retry_ok = retry_ok;
+    m.weak = t->cmode <= 1;
+    m.trials = DMS_BITS_TRIALS;
+    m.deadline = clock() + (clock_t)DMS_BITS_SECONDS * CLOCKS_PER_SEC;
+    rc = dms_multi_bursts(&m, syn, 2, all ? 8 : DMS_QUIET_WEIGHT);
+    if (rc == 0 && all) rc = dms_multi_pairs(&m, syn);
+    if (rc == 0 && all) rc = dms_multi_bursts(&m, syn, 9, 16);
+    if (rc == 0 && m.weak && m.passed == 1) rc = 1;
+    if (rc != 1) return false;
+    /* the one correction that passed: apply it and unpack again, for the data and the state of the right decode */
+    dms_flip(t->cand, &m.hit);
+    if (!dms_trial(t, t->cand, L, retry_ok) || (t->cmode >= 2 && !dms_tail_ok(t->unread))) {
+        dms_flip(t->cand, &m.hit);
+        if (t->cmode >= 2) memcpy(t->x, t->xr, sizeof(*t->x));
+        return false;
     }
-    total = s;
-    for (j = 0; j < 16; j++) col[j] = (uint16_t)(1u << j);        /* M = L^m with m = |B| = reglen - p; start p = reglen */
-    for (p = reglen + 1; p-- > 0 && !found; ) {
-        uint16_t Sx, aL, base;
-        Sx = (uint16_t)(total ^ dms_apply(col, P[p]));                  /* CRC of the suffix reg[p..) */
-        aL = dms_apply(col, dms_crc_L(P[p]));
-        base = (uint16_t)(dcrc ^ Sx ^ aL);                       /* needed: apply(M, tab[e]) == base */
-        for (e = 0; e < 256; e++) {
-            uint16_t te = dms_crc_tab_at(e);
-            if (dms_apply(col, te) != base) continue;
-            if (tries++ >= DMS_REPAIR_MAX_TRIES || dms_budget_over()) { found = false; goto done; }
-            for (i = 0; i < p; i++) fixed[i] = reg[i];
-            fixed[p] = (uint8_t)e;
-            for (i = p; i < reglen; i++) fixed[i + 1] = reg[i];
-            if (dms_crc16(fixed, pklen1) != dcrc) continue;
-            if (dms_trial(x, xs, fixed, pklen1, b1, b2, pklen2, unpklen, cmode, flags, usum)) {
-                *rpos = p;
-                found = true;
-                break;
-            }
-        }
-        for (j = 0; j < 16; j++) col[j] = dms_crc_L(col[j]);
-    }
-done:
-    free(P);
-    return found;
+    *what = m.hit.kind;
+    *at = m.hit.pos[0];
+    *val = (uint8_t)dms_flips_bits(&m.hit);
+    t->rep_skipped = m.skipped;
+    return true;
 }
 
-/* one byte added: `reg` has reglen = pklen1 + 1 bytes; each byte is removed in turn. With P[p] the CRC state after
- * reg[0..p), M = L^|B| for the part B after the byte and `total` the state after all of reg, the CRC after
- * removing the byte p is M (P[p] ^ P[p+1]) ^ total: O(1) per position, instead of a CRC of the whole track */
-static bool dms_fix_extra(dms_ctx_t *x, const dms_ctx_t *xs, const uint8_t *reg, size_t reglen, uint16_t dcrc,
-                          uint8_t *fixed, uint8_t *b1, uint8_t *b2, uint16_t pklen2, uint16_t unpklen,
-                          uint8_t cmode, uint8_t flags, uint16_t usum, size_t *rpos)
+/*
+ * Repair of the packed data of a track. `src` holds the L bytes between the end of the track header and the next valid
+ * track header (or the end of the file); pklen1 is the length declared by the header and dcrc its data CRC. The length
+ * says which damage to look for: L = pklen1 + 1 an extra byte (every distinct deletion is tried), L = pklen1 - 1 a
+ * missing byte (first the runs made longer by one byte, then, for tracks up to DMS_REPAIR_INS_MAX bytes, every value at
+ * every position), L = pklen1 one byte with a wrong value and, if none explains the CRC, a few wrong bits (see
+ * dms_repair_multi). A candidate whose CRC16 equals dcrc is unpacked and accepted only if the checksum of the unpacked
+ * data is right too: in the modes with a dictionary, this gives an independent 16-bit check (about 2^-16 chance of
+ * accepting an incorrect candidate); in NOCOMP and SIMPLE
+ * the checksum is the sum of the bytes of data that any stream gives, and a wrong byte can be replaced by another one
+ * that makes the same sum (the report names the byte that was replaced).
+ * Returns true on success (state and b2 valid); *what = 1 extra byte removed, 2 missing byte restored in a run, 3 missing
+ * byte restored, 4 one byte with a wrong value corrected, 5 a burst of wrong bits corrected, 6 two wrong bits corrected;
+ * *at, *val describe the change.
+ */
+static bool dms_repair_track_work(dms_trk_t *t, const uint8_t *src, size_t L, size_t pklen1, uint16_t dcrc,
+                                  bool *retry_ok, int *what, size_t *at, uint8_t *val)
 {
-    size_t pklen1 = reglen - 1, p;
-    uint16_t *P = (uint16_t *)xmalloc((reglen + 1) * sizeof(uint16_t));
-    uint16_t col[16], s = 0;
-    unsigned j;
-    bool found = false;
+    size_t k;
 
-    for (p = 0; p <= reglen; p++) {
-        P[p] = s;
-        if (p < reglen) s = (uint16_t)(dms_crc_L(s) ^ dms_crc_tab_at(reg[p]));
-    }
-    for (j = 0; j < 16; j++) col[j] = (uint16_t)(1u << j);
-    for (p = reglen; p-- > 0 && !found; ) {
-        if ((uint16_t)(dms_apply(col, (uint16_t)(P[p] ^ P[p + 1])) ^ s) == dcrc) {
-            memcpy(fixed, reg, p);
-            memcpy(fixed + p, reg + p + 1, reglen - p - 1);
-            if (dms_trial(x, xs, fixed, pklen1, b1, b2, pklen2, unpklen, cmode, flags, usum)) {
-                *rpos = p;
-                found = true;
-            }
+    memcpy(t->xr, t->x, sizeof(*t->x));
+    if (L == pklen1) {                                         /* same length: a wrong byte, or a few wrong bits */
+        if (pklen1 <= DMS_REPAIR_INS_MAX && dms_repair_subst(t, src, L, dcrc, retry_ok, at, val)) {
+            *what = 4;
+            return true;
         }
-        for (j = 0; j < 16; j++) col[j] = dms_crc_L(col[j]);
+        return pklen1 <= DMS_REPAIR_INS_MAX && dms_repair_multi(t, src, L, dcrc, retry_ok, what, at, val);
     }
-    free(P);
-    return found;
+    for (k = 0; k < L; k++) {
+        if (k > 0 && src[k] == src[k - 1]) continue;          /* one candidate per run */
+        if (dms_budget_over()) return false;
+        if (L == pklen1 + 1) {                                 /* an extra byte: remove it from the run */
+            memcpy(t->cand, src, k);
+            memcpy(t->cand + k, src + k + 1, L - k - 1);
+        } else {                                               /* a byte is missing: lengthen the run */
+            memcpy(t->cand, src, k);
+            t->cand[k] = src[k];
+            memcpy(t->cand + k + 1, src + k, L - k);
+        }
+        if (dms_crc16(t->cand, pklen1) != dcrc) continue;
+        if (dms_trial(t, t->cand, pklen1, retry_ok)) {
+            *what = (L == pklen1 + 1) ? 1 : 2;
+            *at = k;
+            *val = src[k];
+            return true;
+        }
+        memcpy(t->x, t->xr, sizeof(*t->x));
+    }
+    if (L + 1 == pklen1 && pklen1 <= DMS_REPAIR_INS_MAX &&
+        dms_repair_insert_any(t, src, L, pklen1, dcrc, retry_ok, at, val)) {
+        *what = 3;
+        return true;
+    }
+    return false;
+}
+
+/* dms_repair_track_work, timed: the time of the repairs of the archive (DMS_REPAIR_SECONDS) is the time spent in here */
+static bool dms_repair_track(dms_trk_t *t, const uint8_t *src, size_t L, size_t pklen1, uint16_t dcrc,
+                             bool *retry_ok, int *what, size_t *at, uint8_t *val)
+{
+    bool done;
+    g_dms_rep_t0 = clock();
+    done = dms_repair_track_work(t, src, L, pklen1, dcrc, retry_ok, what, at, val);
+    g_dms_rep_spent += clock() - g_dms_rep_t0;
+    return done;
 }
 
 /* ---------------------------------------------------------------------------------------------------- */
@@ -1338,7 +2020,9 @@ enum {
     DMT_ABSENT = 0,      /* not in the archive: zeros */
     DMT_OK,              /* CRC of the packed data and checksum of the unpacked track are right */
     DMT_REPAIRED,        /* the header or the packed data were damaged and repaired: CRC and checksum are right */
-    DMT_UNVERIFIED,      /* the packed data are intact (CRC) but the checksum of the track is not the expected one */
+    DMT_UNVERIFIED,      /* kept, not verified: the checksum of the track is not the expected one (the packed data are intact),
+                          * or the key (several keys fit, or one fits weakly) or the repair (a class of candidates was skipped)
+                          * is not completely verified */
     DMT_BEST,            /* kept as unpacked, not verified: damaged data, or copies from a damaged track */
     DMT_LOST             /* in the archive, not recovered: zeros */
 };
@@ -1350,7 +2034,7 @@ enum {
     REFUSE_MEMORY,                         /* not enough memory */
     REFUSE_NODISK,                         /* a DMS archive without a disk that can be read */
     REFUSE_DISKTYPE,                       /* disk type 7: the archive does not hold a disk image */
-    REFUSE_ENCRYPTED                       /* an encrypted DMS archive */
+    REFUSE_ENCRYPTED                       /* an encrypted DMS archive that cannot be decrypted */
 };
 
 typedef struct {
@@ -1358,12 +2042,14 @@ typedef struct {
     size_t   image_size;
     unsigned tsize;                        /* bytes per track */
     unsigned maxnum;                       /* highest track found */
-    uint8_t  st[DMS_MAX_TRACKS];           /* DT_* per track */
+    uint8_t  st[DMS_MAX_TRACKS];           /* DMT_* per track */
     unsigned n_ok, n_repaired, n_unverified, n_best, n_lost, n_absent;
     unsigned hdr_repaired;                 /* track headers repaired */
     bool     hdr_ok;                       /* the archive header was right */
     bool     sig_ok;                       /* the signature "DMS!" was right */
     bool     budget_hit;                   /* the search for repairs was stopped by the effort limit */
+    bool     encrypted;                    /* the archive is encrypted (and decrypted, if the key was found) */
+    bool     key_hit;                      /* the search for the key was stopped by the time limit */
     bool     any_error;
     unsigned from, to, version;
     const char *mode;
@@ -1382,33 +2068,75 @@ static unsigned dms_tracks_for(unsigned tsize)
     return tsize == DMS_TRACK_HALF ? DMS_MAX_TRACKS : DMS_STD_TRACKS;
 }
 
+/* a note of the report, limited like the errors of dms_log_error (a damaged track spoils the following ones) */
+static void dms_log_note(unsigned *shown, const char *fmt, ...) PRINTF_LIKE(2, 3);
+static void dms_log_note(unsigned *shown, const char *fmt, ...)
+{
+    char buf[512];
+    va_list ap;
+    if (*shown >= DMS_MAX_LOGGED) { (*shown)++; return; }
+    (*shown)++;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    log_note("%s", buf);
+}
+
+/* How far a stored track can be trusted: 0 nothing (absent or lost), 1 kept with errors, 2 verified */
+static unsigned dms_rank(unsigned st)
+{
+    if (st == DMT_OK || st == DMT_REPAIRED) return 2;
+    return (st == DMT_UNVERIFIED || st == DMT_BEST) ? 1 : 0;
+}
+
 /*
  * Unpacks a DMS archive held in memory. Returns 0 if a disk image was produced (o->image, also when tracks are
- * missing or damaged: see o->st), -1 if the archive cannot be used (the report says why). Track headers are
- * repaired (one or two damaged bytes, the CRC field), packed data are repaired (burst of up to 16 bits, two
- * bits, a lost or an added byte) and accepted only if the track checksum is right, tracks end at the next
- * valid header, a truncated last track is unpacked as far as it goes, damaged tracks are kept as unpacked
- * (best effort) so that the tracks that copy from them are not lost too.
+ * missing or damaged: see o->st), -1 if the archive cannot be used (the report says why).
+ *   - A track header is repaired when it is damaged in one or two bytes or only in its CRC field; a header that cannot
+ *     be repaired is skipped by searching the next valid one (the dictionary of the following tracks is then uncertain).
+ *   - The packed data of a track end at the next valid track header, so a lost or an added byte is seen from the length;
+ *     the file may end inside the last track, which is then unpacked as far as it goes.
+ *   - Every track is decoded and judged by its own checksum. The modes that keep a dictionary from one track to the next
+ *     continue from the dictionary left by the previous tracks; when that dictionary is uncertain (a track was lost or
+ *     damaged, a header was skipped) a track that fails is decoded again from an empty one. A
+ *     HEAVY track that fails after tolerating a last match past its end or an incomplete table of distances is also decoded
+ *     in the other readings of those two points.
+ *   - A track whose packed data have a wrong CRC is first unpacked as it is (the damage may be in bytes that the decoder
+ *     does not need) and kept if the checksum of the unpacked track is right. If not, it is repaired when the length and
+ *     the CRC point at one lost, added or wrong byte, or at a few wrong bits (see dms_repair_multi), and the checksum
+ *     of the unpacked track is then right. The last track has no next header to give its length: the end of the file
+ *     does, when it is one byte off. A track that cannot be verified is kept as decoded (the part before the damage is
+ *     right); a track that decodes to nothing is lost.
+ *   - An encrypted archive is decrypted: the key is found from the checksum of the first disk track (a first track
+ *     that more than one key fits, or that only a weak key fits, is shown as not verified). If the search for the key is
+ *     stopped by the time limit the archive is shown as damaged; if no track can be decrypted it is refused.
+ *   - A track that appears twice is stored once: the one that is verified, or else the first.
  */
 static int dms_unpack_image(const uint8_t *data, uint64_t size, DmsOut *o)
 {
-    uint8_t *b1 = NULL, *b2 = NULL, *b0 = NULL, *fx = NULL, *img = NULL;
+    uint8_t *b1 = NULL, *b2 = NULL, *img = NULL, *cand = NULL, *keep = NULL;
+    dms_ctx_t *x = NULL, *xs = NULL, *xp = NULL, *xr = NULL;
     uint64_t pos;
-    dms_ctx_t *x = NULL, *xs = NULL;
-    unsigned geninfo, from, to, disktype, cmode_hdr, n_ok = 0, n_err = 0;
-    unsigned tsize = 0, maxnum = 0, last_num = 0, exp_num, tmax = DMS_STD_TRACKS;
+    unsigned geninfo, from, to, disktype, cmode_hdr, n_err = 0, n_stored = 0;
+    unsigned tsize = 0, tmax = DMS_STD_TRACKS, maxnum = 0, last_num = 0, exp_num;
+    unsigned n_shown = 0, n_ver = 0, n_kept = 0, t;
     uint8_t hfix[DMS_THLEN];
-    unsigned n_shown = 0;
-    bool any_error = false, hdr_ok = true, got[DMS_MAX_TRACKS];
-    bool state_bad = false;                    /* QUICK..DEEP: the state left by a damaged track is missing */
-    bool degraded = false;                     /* HEAVY: a track was lost or damaged: the next ones are kept as unpacked, reported as not verified */
-    bool trees_ok = true;                      /* HEAVY: the Huffman trees in use are known */
+    bool enc, key_search = true, any_error = false, hdr_ok = true, state_unsure = false;
+    uint16_t kcur = 0;                         /* the running key: the key at the start of the next track */
+    size_t enc_bytes = 0;                      /* encrypted bytes that the key has gone through */
+    dms_trk_t trk;
     int rc = 0;
 
     memset(o, 0, sizeof(*o));
-    memset(got, 0, sizeof(got));
+    dms_crc_init();
     g_dms_budget = DMS_REPAIR_BUDGET;
-    g_dms_deadline = clock() + (clock_t)DMS_REPAIR_SECONDS * CLOCKS_PER_SEC;
+    g_dms_rep_spent = 0;
+    g_dms_rep_t0 = clock();
+    g_dms_bits_hit = false;
+    g_dms_bits_cut = false;
+    g_dms_bits_ticks = 0;
+    g_dms_key_hit = false;
+    g_dms_ticks = 0;
     g_dms_budget_hit = false;
     if (!dms_is_signature(data, size < 512 ? (size_t)size : 512, size)) {
         log_error("DMS: invalid signature");
@@ -1418,7 +2146,7 @@ static int dms_unpack_image(const uint8_t *data, uint64_t size, DmsOut *o)
 
     /* archive header (56 bytes): CRC over bytes 4..53 */
     if (dms_crc16(data + 4, DMS_HEADLEN - 6) != (uint16_t)(((unsigned)data[DMS_HEADLEN - 2] << 8) | data[DMS_HEADLEN - 1])) {
-        dms_log_error(&n_shown, "DMS: INVALID HEADER: archive header CRC mismatch (disk information ignored)");
+        dms_log_error(&n_shown, "DMS: INVALID HEADER: archive header CRC mismatch (disk information ignored, the flag of encryption is kept)");
         any_error = true;
         n_err++;
         hdr_ok = false;
@@ -1434,7 +2162,7 @@ static int dms_unpack_image(const uint8_t *data, uint64_t size, DmsOut *o)
     to        = ((unsigned)data[18] << 8) | data[19];
     disktype  = ((unsigned)data[50] << 8) | data[51];
     cmode_hdr = ((unsigned)data[52] << 8) | data[53];
-    if (!hdr_ok) { geninfo = 0; disktype = 0; to = 0xFFFF; from = 0; }
+    if (!hdr_ok) { geninfo &= 2; disktype = 0; to = 0xFFFF; from = 0; }     /* the flag of encryption stays: the first track decides */
     exp_num = from;
     o->hdr_ok = hdr_ok;
     o->from = from;
@@ -1451,62 +2179,73 @@ static int dms_unpack_image(const uint8_t *data, uint64_t size, DmsOut *o)
         o->refuse = REFUSE_DISKTYPE;
         return -1;
     }
-    if (geninfo & 2) {
-        log_error("DMS: UNSUPPORTED METHOD (encrypted)");
-        o->refuse = REFUSE_ENCRYPTED;
-        return -1;
-    }
+    enc = (geninfo & 2) != 0;
+    o->encrypted = enc;
 
     x = (dms_ctx_t *)xcalloc(1, sizeof(*x));
+    xs = (dms_ctx_t *)xmalloc(sizeof(*x));
+    xp = (dms_ctx_t *)xmalloc(sizeof(*x));
+    xr = (dms_ctx_t *)xmalloc(sizeof(*x));
     b1 = (uint8_t *)xcalloc(1, DMS_TRACK_MAX + DMS_SLACK);
     b2 = (uint8_t *)xcalloc(1, DMS_TRACK_MAX + DMS_SLACK);
-    b0 = (uint8_t *)xcalloc(1, DMS_TRACK_MAX + DMS_SLACK);
-    fx = (uint8_t *)xcalloc(1, DMS_TRACK_MAX + DMS_SLACK);
-    xs = (dms_ctx_t *)xcalloc(1, sizeof(*x));
+    cand = (uint8_t *)xmalloc(DMS_TRACK_MAX + DMS_SLACK);
+    keep = (uint8_t *)xmalloc(DMS_TRACK_MAX + DMS_SLACK);
     dms_init_decrunchers(x);
+    memset(&trk, 0, sizeof(trk));
+    trk.x = x; trk.xs = xs; trk.xp = xp; trk.xr = xr; trk.b1 = b1; trk.b2 = b2; trk.cand = cand; trk.keep = keep;
 
     pos = DMS_HEADLEN;
     for (;;) {
-        unsigned hcrc, dcrc, usum, number, pklen1, pklen2, unpklen, cmode, flags;
+        unsigned dcrc, usum, number, pklen1, pklen2, unpklen, cmode, flags, use_len, stat_new, rank_new;
         const uint8_t *th;
-        int r = 1;                                 /* 1: no unpack attempted (DMS_LOSE_TRACK reads it) */
-        bool crc_ok, sum_ok, indel, repaired = false, hdr_fixed = false;
-        unsigned stat_new = DMT_OK;
-        uint64_t npos = 0, after;
-        size_t reglen;
-        uint16_t loc_before;
+        uint64_t data_start, next_pos;
+        bool crc_ok, ok, retry_ok = false, stateful, repaired = false, trunc, decoded = false, hdr_fixed = false;
+        bool key_unsure = false;               /* the key of this track is one of several that match its checksum, or fits weakly */
+        bool rep_unsure = false;               /* the repair of this track skipped a class of candidates with fewer wrong bits */
+        int r = 0;
+        size_t rep_L = 0;                      /* the length of the track data when it is one byte off the declared one */
+        size_t rep_L2 = 0;                     /* a second length to try when the first repair fails */
+        uint16_t k_start;
+        size_t enc_before;
+        /* the highest track that the archive header announces (or, if more tracks were found, the last track of a
+         * standard disk) was found: what follows is not a track */
+        const bool all_found = n_stored > 0 && last_num >= (maxnum > to ? tmax - 1 : to);
 
-        if (pos >= size) break;                    /* clean end of the data */
+        if (pos >= size) break;                /* clean end of the data */
         th = data + pos;
-        if (size - pos >= DMS_THLEN && !dms_header_at(data, size, pos) && !(n_ok > 0 && last_num >= to) &&
+        if (size - pos >= DMS_THLEN && !dms_header_at(data, size, pos) && !all_found &&
             dms_fix_header(data, size, pos, exp_num, hfix)) {
-            /* one damaged byte in the header: the track is not lost any more */
-            if (n_shown++ < DMS_MAX_LOGGED)
-                log_note("DMS: track header at offset %llu damaged and repaired (track %u)",
+            /* a damaged byte in the header: the track is not lost any more */
+            dms_log_note(&n_shown, "DMS: track header at offset %llu damaged and repaired (track %u)",
                          (unsigned long long)pos, ((unsigned)hfix[2] << 8) | hfix[3]);
             th = hfix;
             hdr_fixed = true;
             o->hdr_repaired++;
         }
-        if (size - pos < DMS_THLEN || th[0] != 'T' || th[1] != 'R') {
-            /* whatever follows the last track (text, zeros) is not an error: the highest track
-             * number of the archive header decides, if it was reached the rest is ignored */
-            if (n_ok > 0 && last_num >= to) break;
-            if (dms_resync(data, size, pos + 1, &npos)) goto resync;
-            dms_log_error(&n_shown, "DMS: INVALID HEADER: track header expected at offset %llu (%llu bytes left)",
-                      (unsigned long long)pos, (unsigned long long)(size - pos));
+        if (size - pos < DMS_THLEN || !dms_header_ok(th)) {
+            uint64_t q;
+            if (size - pos < DMS_THLEN || th[0] != 'T' || th[1] != 'R') {
+                /* whatever follows the last track (text, zeros) is not an error: the highest track number of the
+                 * archive header decides, if it was reached the rest is ignored */
+                if (all_found) break;
+                dms_log_error(&n_shown, "DMS: INVALID HEADER: track header expected at offset %llu (%llu bytes left)",
+                              (unsigned long long)pos, (unsigned long long)(size - pos));
+            } else if (dms_crc16(th, DMS_THLEN - 2) != (uint16_t)(((unsigned)th[18] << 8) | th[19])) {
+                dms_log_error(&n_shown, "DMS: INVALID HEADER: track header CRC mismatch at offset %llu",
+                              (unsigned long long)pos);
+            } else {
+                dms_log_error(&n_shown, "DMS: INVALID HEADER: track %u too big at offset %llu",
+                              ((unsigned)th[2] << 8) | th[3], (unsigned long long)pos);
+            }
             any_error = true;
             n_err++;
-            break;
-        }
-        hcrc = ((unsigned)th[18] << 8) | th[19];
-        if (dms_crc16(th, DMS_THLEN - 2) != hcrc) {
-            if (dms_resync(data, size, pos + 1, &npos)) goto resync;
-            dms_log_error(&n_shown, "DMS: INVALID HEADER: track header CRC mismatch at offset %llu, cannot continue",
-                      (unsigned long long)pos);
-            any_error = true;
-            n_err++;
-            break;
+            /* not the end of the archive: go on at the next valid track header */
+            if (size - pos < DMS_THLEN || !dms_resync(data, size, pos + 1, &q)) break;
+            log_msg("  DMS: next track header found at offset %llu (%llu bytes skipped)", (unsigned long long)q,
+                    (unsigned long long)(q - pos));
+            pos = q;
+            state_unsure = true;               /* the skipped bytes may hold tracks */
+            continue;
         }
         number  = ((unsigned)th[2] << 8) | th[3];
         exp_num = number + 1;
@@ -1518,220 +2257,215 @@ static int dms_unpack_image(const uint8_t *data, uint64_t size, DmsOut *o)
         usum    = ((unsigned)th[14] << 8) | th[15];
         dcrc    = ((unsigned)th[16] << 8) | th[17];
 
-        if (pklen1 > DMS_TRACK_MAX || pklen2 > DMS_TRACK_MAX || unpklen > DMS_TRACK_MAX) {
-            if (dms_resync(data, size, pos + 1, &npos)) goto resync;
-            dms_log_error(&n_shown, "DMS: INVALID HEADER: track %u too big, cannot continue", number);
-            any_error = true;
-            n_err++;
-            break;
-        }
-        /* a byte lost or added inside the data of this track (or a damaged length) shows as a next valid
-         * header that is not where pklen1 says: the region up to it is the data of this track */
-        reglen = pklen1;
-        after = pos + DMS_THLEN + pklen1;
-        indel = false;
-        if (after < size ? !dms_header_at(data, size, after) : after > size) {
-            uint64_t nh = 0;
-            bool have = dms_resync(data, size, pos + DMS_THLEN, &nh);
-            uint64_t gap = have ? nh - (pos + DMS_THLEN) : size - (pos + DMS_THLEN);
-            if (gap + 1 == pklen1 || gap == (uint64_t)pklen1 + 1) {
-                indel = true;
-                reglen = (size_t)gap;
-                after = have ? nh : size;
-            }
-        }
-        if (!indel && size - pos - DMS_THLEN < pklen1) {
-            /* the archive ends inside this track: what is there is unpacked (the rest of the packed data is
-             * zero) and kept as a best effort: the beginning of the track is right */
-            if (size - pos - DMS_THLEN >= 16 && number < DMS_MAX_TRACKS && unpklen > 2048) {
-                indel = true;
-                reglen = (size_t)(size - pos - DMS_THLEN);
-                after = size;
-                dms_log_error(&n_shown, "DMS: TRUNCATED, track %u (%llu of %u packed bytes present)", number, (unsigned long long)reglen,
-                              pklen1);
-                any_error = true;
-                n_err++;
-            } else {
-                dms_log_error(&n_shown, "DMS: TRUNCATED, track %u", number);
-                any_error = true;
-                n_err++;
-                break;
-            }
-        }
-        if (indel) {
-            memcpy(b0, data + pos + DMS_THLEN, reglen);
-            memcpy(b1, b0, reglen < pklen1 ? reglen : pklen1);
-            if (reglen < pklen1) memset(b1 + reglen, 0, pklen1 - reglen);
+        data_start = pos + DMS_THLEN;
+        trunc = size - data_start < pklen1;    /* the file ends inside the track: decode what is there */
+        if (trunc) {
+            next_pos = size;
+            use_len = (unsigned)(size - data_start);
+            crc_ok = false;
+            if (use_len + 1 == pklen1) rep_L = use_len;      /* the file ends one byte early: a byte lost, or a cut */
         } else {
-            memcpy(b1, data + pos + DMS_THLEN, pklen1);
+            next_pos = data_start + pklen1;
+            use_len = pklen1;
+            crc_ok = dms_crc16(data + data_start, pklen1) == dcrc;
         }
-        pos = after;
+        if (!crc_ok && !trunc) {
+            /* the length in the header cannot be trusted (a byte lost or added): the next valid track header,
+             * searched from the start of the data, tells where the track ends */
+            uint64_t q = 0, lq = pklen1;       /* no later header: as declared */
+            bool found_q = dms_resync(data, size, data_start, &q);
+            if (found_q) lq = q - data_start;
+            if (!found_q && size - next_pos == 1) {
+                rep_L = pklen1 + 1;            /* the file ends one byte late: a byte added in the data, or a stray byte */
+                rep_L2 = pklen1;
+            } else if (!found_q || q > next_pos + 1) rep_L = pklen1;    /* nothing says that the length is not the declared one */
+            else if (lq == (uint64_t)pklen1 + 1 || lq + 1 == (uint64_t)pklen1 || lq == (uint64_t)pklen1) rep_L = (size_t)lq;
+            /* The data end at the next header when it is earlier than declared (bytes lost) or one byte later (a byte
+             * added). A header found farther on is not a longer track: the header at the declared end is damaged, and
+             * the next track is repaired or skipped when the loop gets there. */
+            if (found_q && q != next_pos && (q < next_pos || q == next_pos + 1)) {
+                if (q < next_pos) use_len = (unsigned)(q - data_start);
+                log_msg("  DMS: track %u: the next track header is at offset %llu instead of %llu", number,
+                        (unsigned long long)q, (unsigned long long)next_pos);
+                next_pos = q;
+            }
+        }
+        pos = next_pos;
 
-        /* tracks 80 (FILEID.DIZ), 0xFFFF (banner) and the 1 KiB fake boot block are not disk data; the 160 tracks of
-         * 5632 bytes are */
-        if (unpklen <= 2048 || number >= DMS_MAX_TRACKS || (number >= DMS_STD_TRACKS && unpklen != DMS_TRACK_HALF))
+        /* the key at the start of this track; the running key goes through its packed data */
+        k_start = kcur;
+        enc_before = enc_bytes;
+        if (enc && number != 80) {
+            kcur = dms_key_advance(kcur, data + data_start, (size_t)(next_pos - data_start));
+            enc_bytes += (size_t)(next_pos - data_start);
+        }
+
+        /* tracks 80 (the file description), 0xFFFF (the banner) and the 1 KiB fake boot block are not disk data; the
+         * 160 tracks of 5632 bytes are. They leave an empty dictionary. */
+        if (unpklen <= 2048 || number >= DMS_MAX_TRACKS || (number >= DMS_STD_TRACKS && unpklen != DMS_TRACK_HALF)) {
+            dms_init_decrunchers(x);
             continue;
+        }
 
-        loc_before = x->heavy_loc;
-        /* A lost track (discarded): the stateful modes depend on what it left. QUICK..DEEP: the state is unknown up
-         * to the first track that ends with a reset. HEAVY: the write position of the dictionary is kept right
-         * (pklen2), the trees are unknown only if the lost track carried them, and the next tracks are decoded and
-         * kept only if their checksum is right (what they copy from the lost track is wrong). */
-#define DMS_LOSE_TRACK() do {                                                                       \
-            any_error = true;                                                                       \
-            n_err++;                                                                                \
-            o->st[number] = DMT_LOST;                                                                \
-            if (cmode >= 5) {                                                                       \
-                dms_heavy_lost(x, flags, loc_before, pklen2);                                       \
-                degraded = true;                                                                    \
-                if ((flags & 2) && r != 0 && r != 3) trees_ok = false;   /* trees not read */       \
-            } else {                                                                                \
-                dms_init_decrunchers(x);                                                            \
-                if (cmode >= 2 && (flags & 1)) state_bad = true;                                    \
-            }                                                                                       \
-        } while (0)
-
-        if (state_bad && cmode >= 2 && cmode <= 4) {
-            /* the state is unknown, but a track that does not need it still unpacks right: if its packed
-             * data are intact (CRC) and the track checksum is right, it is kept */
-            if (!indel && dms_crc16(b1, pklen1) == dcrc) {
-                r = dms_unpack_track(x, b1, pklen1, b2, (uint16_t)pklen2, (uint16_t)unpklen, (uint8_t)cmode,
-                                     (uint8_t)flags);
-                if (r == 0 && dms_checksum(b2, unpklen) == usum) {
-                    if (n_shown++ < DMS_MAX_LOGGED)
-                        log_note("DMS: track %u: it did not need the state of the damaged track: track kept (verified)",
-                                 number);
-                    crc_ok = true;
-                    sum_ok = true;
-                    if (!(flags & 1)) state_bad = false;
-                    goto store_track;
-                }
+        stateful = cmode >= 2;
+        trk.unsure = state_unsure;
+        trk.loud = false;
+        trk.pklen2 = pklen2; trk.unpklen = unpklen; trk.cmode = cmode; trk.flags = flags; trk.usum = usum;
+        trk.enc = enc;
+        trk.k0 = k_start;
+        if (enc && key_search && crc_ok) {
+            /* the first disk track of an encrypted archive: (1) the key that the data before it gave (a banner),
+             * (2) not encrypted after all (the flag set by mistake), (3) the 65536 keys. The later tracks just follow
+             * the running key, which synchronizes itself after a few bytes. */
+            key_search = false;
+            decoded = true;
+            dms_init_decrunchers(x);
+            ok = dms_decode_verify(&trk, data + data_start, use_len, &r, &retry_ok);
+            if (!ok) {
                 dms_init_decrunchers(x);
-            }
-            dms_log_error(&n_shown, "DMS: track %u discarded: it depends on the state of a damaged track", number);
-            any_error = true;
-            n_err++;
-            o->st[number] = DMT_LOST;
-            if (!(flags & 1)) { state_bad = false; dms_init_decrunchers(x); }
-            continue;
-        }
-        r = 1;
-        if (cmode >= 5 && !trees_ok && !(flags & 2)) {
-            dms_log_error(&n_shown, "DMS: track %u discarded: its Huffman trees are in a damaged track", number);
-            DMS_LOSE_TRACK();
-            continue;
-        }
-        crc_ok = dms_crc16(b1, pklen1) == dcrc && !indel;
-        if (!crc_ok) {
-            *xs = *x;                              /* the state before the track, for the repair */
-            if (!indel) memcpy(b0, b1, pklen1);
-        }
-        /* a track whose packed-data CRC is wrong is unpacked all the same: if the track checksum then is right the
-         * data are good (damaged padding bits, or a wrong CRC field) */
-        r = dms_unpack_track(x, b1, pklen1, b2, (uint16_t)pklen2, (uint16_t)unpklen, (uint8_t)cmode,
-                             (uint8_t)flags);
-        if (!crc_ok && r != 2) {
-            /* wrong CRC and no verified result: look for what damaged the packed data. `fixed` is the
-             * second work buffer of the repair (b1 and b2 are used by the trial unpacks) */
-            size_t rp = 0;
-            const char *what = NULL;
-            *x = *xs;
-            if (indel && reglen + 1 == pklen1) {
-                if (dms_fix_lost(x, xs, b0, reglen, (uint16_t)dcrc, fx, b1, b2, (uint16_t)pklen2,
-                                 (uint16_t)unpklen, (uint8_t)cmode, (uint8_t)flags, (uint16_t)usum, &rp))
-                    what = "a lost byte was re-inserted at";
-            } else if (indel && reglen == pklen1 + 1) {
-                if (dms_fix_extra(x, xs, b0, reglen, (uint16_t)dcrc, fx, b1, b2, (uint16_t)pklen2,
-                                  (uint16_t)unpklen, (uint8_t)cmode, (uint8_t)flags, (uint16_t)usum, &rp))
-                    what = "an extra byte was removed at";
-            } else if (indel) {
-                /* more than one byte missing: nothing to repair */
-            } else if (dms_fix_burst(x, xs, b0, pklen1, (uint16_t)dcrc, fx, b1, b2, (uint16_t)pklen2,
-                                     (uint16_t)unpklen, (uint8_t)cmode, (uint8_t)flags, (uint16_t)usum, &rp)) {
-                what = "damaged packed data were corrected at";
-            } else if (dms_fix_twobits(x, xs, b0, pklen1, (uint16_t)dcrc, fx, b1, b2, (uint16_t)pklen2,
-                                       (uint16_t)unpklen, (uint8_t)cmode, (uint8_t)flags, (uint16_t)usum, &rp)) {
-                what = "two damaged bits were corrected near";
-            }
-            if (what) {
-                memcpy(b1, fx, pklen1);
-                *x = *xs;
-                r = dms_unpack_track(x, b1, pklen1, b2, (uint16_t)pklen2, (uint16_t)unpklen, (uint8_t)cmode,
-                                     (uint8_t)flags);
-                crc_ok = true;
-                repaired = true;
-                if (n_shown++ < DMS_MAX_LOGGED)
-                    log_note("DMS: track %u repaired: %s offset %llu of the packed data (CRC and track checksum are "
-                             "right)", number, what, (unsigned long long)rp);
-            } else {
-                /* no repair: unpack the data as they are (the trials spoiled b1, b2 and x) */
-                *x = *xs;
-                memcpy(b1, b0, reglen < pklen1 ? reglen : pklen1);
-                if (reglen < pklen1) memset(b1 + reglen, 0, pklen1 - reglen);
-                r = dms_unpack_track(x, b1, pklen1, b2, (uint16_t)pklen2, (uint16_t)unpklen, (uint8_t)cmode,
-                                     (uint8_t)flags);
-                if (r != 0 && r != 3) *x = *xs;    /* a failed unpack leaves garbage: the state before the track */
-            }
-        }
-        if (r == 2) {
-            dms_log_error(&n_shown, "DMS: UNSUPPORTED METHOD %u, track %u discarded", cmode, number);
-            DMS_LOSE_TRACK();
-            continue;
-        }
-        if (r == 1) {
-            if (crc_ok)
-                dms_log_error(&n_shown, "DMS: CRC (decompression failed, mode %s), track %u discarded",
-                              dms_mode_name(cmode), number);
-            else
-                dms_log_error(&n_shown, "DMS: CRC mismatch, track %u discarded", number);
-            DMS_LOSE_TRACK();
-            continue;
-        }
-        if (cmode >= 5 && (flags & 2)) trees_ok = true;            /* the trees of this track were read */
-        sum_ok = (r == 0) && dms_checksum(b2, unpklen) == usum;
-        if (!sum_ok && (!crc_ok || degraded)) {
-            if (r == 0 || r == 3) {
-                /* best effort: the stream unpacks to a whole track but the track is not verified (packed data
-                 * damaged and not repairable, or copies from a damaged track). What was unpacked is kept: the part
-                 * before the damage is right, and zeros would lose it too. The state it leaves is the one the next
-                 * tracks have to use. */
-                dms_log_error(&n_shown, "DMS: track %u: %s: track kept as unpacked (best effort, not verified)",
-                              number,
-                              crc_ok ? "track checksum mismatch after a damaged track"
-                                     : "the packed data are damaged and cannot be repaired");
-                any_error = true;
-                n_err++;
-                stat_new = DMT_BEST;
-                if (!crc_ok) {
-                    if (cmode >= 5) degraded = true;
-                    else if (flags & 1) state_bad = true;
+                trk.enc = false;
+                ok = dms_decode_verify(&trk, data + data_start, use_len, &r, &retry_ok);
+                if (ok) {
+                    enc = false;
+                    o->encrypted = false;
+                    dms_log_note(&n_shown, "DMS: the archive is marked as encrypted but its data is not: no decryption");
+                } else {
+                    trk.enc = true;
                 }
-            } else {
-                if (crc_ok)
-                    dms_log_error(&n_shown, "DMS: track %u: track checksum mismatch after a damaged track, discarded",
-                                  number);
+            }
+            if (!ok && enc_before < 64) {
+                log_msg("  DMS: encrypted archive: searching the decryption key of track %u (65536 candidates)", number);
+                if (dms_find_key(&trk, data + data_start, use_len, number, &r, &retry_ok)) {
+                    ok = true;
+                    kcur = dms_key_advance(trk.k0, data + data_start, use_len);
+                    dms_log_note(&n_shown, "DMS: encrypted archive: decryption key 0x%04X found (the checksum of track %u is right)",
+                                 (unsigned)trk.k0, number);
+                    if (trk.ambiguous) {
+                        key_unsure = true;
+                        dms_log_note(&n_shown, "DMS: encrypted archive: another key gives the right checksum for track %u too: "
+                                     "its first bytes (up to about 20) are not certain", number);
+                    }
+                    if (trk.weakkey) {
+                        key_unsure = true;
+                        dms_log_note(&n_shown, "DMS: encrypted archive: the key gives the right checksum for track %u but the "
+                                     "unpacked data do not end where the packed data end: the key is not verified (a key that "
+                                     "fits by chance is found about once in a search), the track is shown as not verified",
+                                     number);
+                    }
+                } else {
+                    dms_init_decrunchers(x);
+                    trk.k0 = k_start;
+                    ok = dms_decode_verify(&trk, data + data_start, use_len, &r, &retry_ok);
+                    dms_log_error(&n_shown, "DMS: encrypted archive: no decryption key gives the right checksum for track %u", number);
+                }
+            }
+        }
+        if (!decoded && !crc_ok && !(enc && key_search && enc_before < 64)) {
+            /* the CRC of the packed data is wrong: unpack them as they are first, the damage may be in bytes that the
+             * decoder does not need. If the checksum of the unpacked track is right the track is kept; else the
+             * decompressor goes back to its state and the repairs are tried */
+            memcpy(trk.xr, x, sizeof(*x));
+            ok = dms_decode_verify(&trk, data + data_start, use_len, &r, &retry_ok);
+            decoded = true;
+            trk.loud = r != 0 || !dms_tail_ok(trk.unread);
+            if (!ok && rep_L != 0) {
+                memcpy(x, trk.xr, sizeof(*x));
+                decoded = false;
+            }
+        }
+        if (!decoded && !crc_ok && rep_L != 0 && !(enc && key_search && enc_before < 64)) {   /* a lost, added or wrong byte or bit? */
+            int what = 0;
+            size_t at = 0;
+            uint8_t val = 0;
+            size_t used_L = rep_L;
+            bool done = dms_repair_track(&trk, data + data_start, rep_L, pklen1, (uint16_t)dcrc, &retry_ok, &what, &at, &val);
+            if (!done && rep_L2 != 0) {
+                used_L = rep_L2;
+                done = dms_repair_track(&trk, data + data_start, rep_L2, pklen1, (uint16_t)dcrc, &retry_ok, &what, &at, &val);
+            }
+            if (done) {
+                repaired = true;
+                if (used_L > pklen1 && next_pos < size && data_start + used_L == size) pos = next_pos = size;   /* the byte that ended the file was part of the track */
+                if (what >= 5) {
+                    dms_log_note(&n_shown, "DMS: track %u repaired: %s (%u bit%s) at offset %llu of the track data (the CRC of the "
+                                 "packed data and the checksum of the unpacked data are both right)", number,
+                                 what == 5 ? "a burst of wrong bits corrected" : "two wrong bits corrected", (unsigned)val,
+                                 val == 1 ? "" : "s", (unsigned long long)at);
+                    if (trk.rep_skipped) {
+                        rep_unsure = true;
+                        dms_log_note(&n_shown, "DMS: track %u: a class of candidates with fewer wrong bits was too large to be "
+                                     "tried before this correction was found: the correction is not completely verified, the "
+                                     "track is shown as not verified", number);
+                    }
+                } else
+                    dms_log_note(&n_shown, "DMS: track %u repaired: %s 0x%02X at offset %llu of the track data (the CRC of the "
+                                 "packed data and the checksum of the unpacked data are both right)", number,
+                                 what == 1 ? "one extra byte removed from a run of" : what == 2 ? "one missing byte restored in a run of"
+                                           : what == 3 ? "one missing byte restored, value" : "one wrong byte replaced, new value",
+                                 (unsigned)val, (unsigned long long)at);
+            }
+        }
+        if (repaired) {
+            ok = true;
+            if (enc) kcur = dms_key_advance(k_start, cand, pklen1);   /* the key goes through the repaired data */
+        } else if (!decoded) ok = dms_decode_verify(&trk, data + data_start, use_len, &r, &retry_ok);
+        if (!ok) {
+            /* what could be decoded of a damaged track is kept (it is better than a hole in the disk) and the report
+             * says so; nothing is kept when there is nothing to keep (an unknown method, no byte decoded) */
+            bool keep_it = r != 2 && trk.got > 0;
+            char fate[112] = "discarded";
+            if (keep_it) {
+                if (trk.got < unpklen)
+                    snprintf(fate, sizeof(fate), "kept with errors (%lu of %u bytes decoded, the rest is zero)",
+                             (unsigned long)trk.got, unpklen);
                 else
-                    dms_log_error(&n_shown, "DMS: CRC mismatch, track %u discarded", number);
-                DMS_LOSE_TRACK();
+                    snprintf(fate, sizeof(fate), "kept with errors");
+            }
+            if (trunc)
+                dms_log_error(&n_shown, "DMS: TRUNCATED, track %u %s", number, fate);
+            else if (!crc_ok)
+                dms_log_error(&n_shown, "DMS: CRC mismatch, track %u %s", number, fate);
+            else if (r == 2)
+                dms_log_error(&n_shown, "DMS: UNSUPPORTED METHOD %u, track %u %s", cmode, number, fate);
+            else if (r != 0)
+                dms_log_error(&n_shown, "DMS: CRC (decompression failed, mode %s), track %u %s", dms_mode_name(cmode),
+                              number, fate);
+            else
+                dms_log_error(&n_shown, "DMS: CRC mismatch (track checksum, mode %s), track %u %s", dms_mode_name(cmode),
+                              number, fate);
+            any_error = true;
+            if (stateful) {
+                if (flags & 1) state_unsure = true;
+                else { dms_init_decrunchers(x); state_unsure = false; }   /* the encoder reset it after this track */
+            }
+            if (!keep_it) {
+                n_err++;
+                if (o->st[number] == DMT_ABSENT) o->st[number] = DMT_LOST;
                 continue;
             }
-        } else if (!crc_ok) {
-            if (n_shown++ < DMS_MAX_LOGGED)
-                log_note("DMS: track %u: the CRC of the packed data is wrong but the track checksum is right: "
-                         "track kept", number);
-        } else if (!sum_ok) {
-            /* the packed data are intact (CRC) and the stream decodes: the track is kept, its content is not
-             * verified. The dictionary left by the stream is the right one for the next tracks. */
-            dms_log_error(&n_shown, "DMS: track %u: %s (mode %s): track kept, not verified", number,
-                          r == 3 ? "the RLE data end before the track does (the rest is zero)" : "track checksum mismatch",
-                          dms_mode_name(cmode));
-            any_error = true;
-            n_err++;
-            stat_new = DMT_UNVERIFIED;
+            stat_new = (crc_ok && r == 0) ? DMT_UNVERIFIED : DMT_BEST;
+            rank_new = 1;
+        } else {
+            if (trunc) {
+                if (!repaired)
+                    dms_log_note(&n_shown, "DMS: TRUNCATED, track %u: the file ends %u bytes early but the checksum of the unpacked "
+                                 "data is right: track kept", number, pklen1 - use_len);
+            } else if (!crc_ok && !repaired)
+                dms_log_note(&n_shown, "DMS: the packed data CRC of track %u does not match but the checksum of the unpacked "
+                             "data does: track kept", number);
+            if (retry_ok)
+                log_msg("  DMS: track %u unpacked from an empty dictionary (the previous tracks are damaged or missing)",
+                        number);
+            if (trk.quirks) {
+                char qt[160];
+                dms_quirk_text(trk.quirks, qt, sizeof(qt));
+                dms_log_note(&n_shown, "DMS: track %u decoded with tolerance (%s): the checksum of the unpacked data is right",
+                             number, qt);
+            }
+            if (state_unsure && (!(flags & 1) || (cmode >= 5 && pklen2 >= 8192))) state_unsure = false;
+            stat_new = (key_unsure || rep_unsure) ? DMT_UNVERIFIED : (repaired || hdr_fixed) ? DMT_REPAIRED : DMT_OK;
+            rank_new = (key_unsure || rep_unsure) ? 1 : 2;
         }
-#undef DMS_LOSE_TRACK
-        if (stat_new == DMT_OK && (repaired || hdr_fixed)) stat_new = DMT_REPAIRED;
-store_track:
         if (tsize == 0) {
             tsize = unpklen;
             tmax = dms_tracks_for(tsize);
@@ -1740,42 +2474,48 @@ store_track:
             dms_log_error(&n_shown, "DMS: track %u has size %u instead of %u, discarded", number, unpklen, tsize);
             any_error = true;
             n_err++;
-            o->st[number] = DMT_LOST;
+            if (o->st[number] == DMT_ABSENT) o->st[number] = DMT_LOST;
             continue;
         }
-        if (number >= tmax) continue;              /* a track the image cannot hold (160-track numbers in a 80-track disk) */
+        if (number >= tmax) continue;          /* a track the image cannot hold (160-track numbers in a 80-track disk) */
+        if (dms_rank(o->st[number]) > 0) {     /* a second copy of the track: only a better one replaces the first */
+            if (dms_rank(o->st[number]) >= rank_new) {
+                log_msg("  DMS: track %u appears twice: the first copy is kept", number);
+                continue;
+            }
+            n_stored--;
+        }
         memcpy(img + (size_t)number * tsize, b2, tsize);
-        got[number] = true;
         o->st[number] = (uint8_t)stat_new;
+        n_stored++;
         if (number > maxnum) maxnum = number;
         last_num = number;
-        n_ok++;
-        continue;
-resync:                                            /* damaged header: go on at the next valid one */
-        dms_log_error(&n_shown, "DMS: INVALID HEADER at offset %llu: %llu bytes skipped, the archive goes on at offset %llu",
-                      (unsigned long long)pos, (unsigned long long)(npos - pos), (unsigned long long)npos);
-        any_error = true;
-        n_err++;
-        degraded = true;                           /* the tracks in the gap are lost, and with them their state */
-        state_bad = true;
-        pos = npos;
     }
 
-    if (n_ok == 0) {
-        log_error("DMS: no disk track found in the archive");
+    for (t = 0; t < DMS_MAX_TRACKS; t++) {
+        unsigned rk = dms_rank(o->st[t]);
+        if (rk == 2) n_ver++;
+        else if (rk == 1) n_kept++;
+    }
+    if (n_stored == 0 || (enc && n_ver == 0 && !g_dms_key_hit)) {
+        /* nothing to show: no track, or an encrypted archive of which no track could be verified (decoded with a
+         * wrong key it gives noise). If the search for the key was stopped by the time limit the archive is shown as
+         * damaged, so that the report can say why */
+        log_error(n_stored == 0 ? "DMS: no disk track found in the archive"
+                                : "DMS: encrypted archive: no track could be decrypted");
         any_error = true;
-        o->refuse = REFUSE_NODISK;
+        o->refuse = enc ? REFUSE_ENCRYPTED : REFUSE_NODISK;
         rc = -1;
     } else {
-        /* a standard DD or HD disk is always written at its full size (80 cylinders), missing tracks are
-         * zero; any other geometry is written up to its highest track */
+        /* a standard DD or HD disk is always written at its full size (80 cylinders), missing tracks are zero; any
+         * other geometry is written up to its highest track */
         size_t imgsize = (tsize == DMS_TRACK_DD || tsize == DMS_TRACK_HD || tsize == DMS_TRACK_HALF)
                              ? (size_t)tmax * tsize
                              : (size_t)(maxnum + 1) * tsize;
-        unsigned t, missing = 0;
+        unsigned missing = 0;
 
         if (tsize == DMS_TRACK_DD || tsize == DMS_TRACK_HD) imgsize = (size_t)DMS_STD_TRACKS * tsize;
-        for (t = 0; t <= maxnum; t++) if (!got[t]) missing++;
+        for (t = 0; t <= maxnum; t++) if (dms_rank(o->st[t]) == 0) missing++;
         if (missing > 0)
             log_msg("  DMS: %u tracks of the disk are missing (written as zeros)", missing);
         o->image = img;
@@ -1795,21 +2535,38 @@ resync:                                            /* damaged header: go on at t
         }
     }
     if (n_shown > DMS_MAX_LOGGED)
-        log_msg("  DMS: %u further errors not shown (only the first %d are listed)", n_shown - DMS_MAX_LOGGED,
+        log_msg("  DMS: %u further messages not shown (only the first %d are listed)", n_shown - DMS_MAX_LOGGED,
                 DMS_MAX_LOGGED);
     if (g_dms_budget_hit) {
         o->budget_hit = true;
-        log_msg("  DMS: the search for repairs was stopped by the effort limit (%d trial unpacks or %d seconds)", DMS_REPAIR_BUDGET, DMS_REPAIR_SECONDS);
+        log_msg("  DMS: the search for repairs was stopped by the effort limit (%d trial unpacks or %d seconds)",
+                DMS_REPAIR_BUDGET, DMS_REPAIR_SECONDS);
+    }
+    if (g_dms_bits_hit)
+        log_msg("  DMS: the search for repairs of wrong bits was stopped by the limit of the archive (half of the time and of "
+                "the trials of the repairs)");
+    if (g_dms_bits_cut)
+        log_msg("  DMS: in some track the search for repairs of wrong bits did not try every candidate: a class was too large "
+                "for the limit of a track (%d trial unpacks, %d s)", DMS_BITS_TRIALS, DMS_BITS_SECONDS);
+    if (g_dms_key_hit) {
+        o->key_hit = true;
+        log_msg("  DMS: the search for the decryption key was stopped by the time limit (%d seconds)", DMS_KEY_SECONDS);
     }
     o->any_error = any_error;
-    log_msg("  DMS: %u tracks extracted, %u in error", n_ok, n_err);
+    if (n_kept)
+        log_msg("  DMS: %u tracks extracted (%u of them not verified or with errors, kept as decoded), %u in error",
+                n_ver + n_kept, n_kept, n_err);
+    else
+        log_msg("  DMS: %u tracks extracted, %u in error", n_ver, n_err);
     free(img);
     free(b1);
     free(b2);
-    free(b0);
-    free(fx);
-    free(xs);
+    free(cand);
+    free(keep);
     free(x);
+    free(xs);
+    free(xp);
+    free(xr);
     return rc;
 }
 
@@ -1821,6 +2578,7 @@ resync:                                            /* damaged header: go on at t
 #define T_HEADER   2
 #define T_DATA     8
 #define T_LIST     16
+#define T_DIRC     33                         /* directory cache block (DC-OFS / DC-FFS) */
 #define ST_ROOT    1
 #define ST_USERDIR 2
 #define ST_FILE    (-3)
@@ -1858,6 +2616,9 @@ typedef struct {
     adf_hdr_t *hf, *hd;             /* file headers and user directory headers found by the scan */
     size_t    nhf, nhd;
     bool      hscan_done;
+    bool      strict_oidx;          /* index only the OFS data blocks whose checksum is right (no root block, no file header) */
+    bool      headerless;           /* no root block and no file header: the files are rebuilt from the OFS data blocks */
+    uint32_t  n_dup;                /* OFS data blocks left out of the index: same (header, sequence) as another block */
     /* statistics of the walk of the whole disk */
     uint32_t  n_files, n_dirs, n_part, n_lost;
     /* damaged blocks, by track (a track = a cylinder: 22 blocks of a DD disk, 44 of an HD disk) */
@@ -2089,6 +2850,7 @@ static void adf_oidx_build(adf_img_t *img)
         const uint8_t *blk = img->data + (size_t)b * ADF_BLOCK_SIZE;
         uint32_t hk, seq;
         if (read_be32(blk) != T_DATA) continue;
+        if (img->strict_oidx && adf_sum(blk) != 0) continue;
         hk = read_be32(blk + 4);
         seq = read_be32(blk + 8);
         if (hk < 2 || hk >= img->nblk || seq == 0 || read_be32(blk + 12) > ADF_BLOCK_SIZE - 24) continue;
@@ -2100,7 +2862,47 @@ static void adf_oidx_build(adf_img_t *img)
         img->oidx[img->noidx].blk = b;
         img->noidx++;
     }
-    if (img->noidx > 1) qsort(img->oidx, img->noidx, sizeof(*img->oidx), adf_oent_cmp);
+    if (img->noidx > 1) {
+        size_t i, j, k = 0;
+        qsort(img->oidx, img->noidx, sizeof(*img->oidx), adf_oent_cmp);
+        /* The same (header, sequence) in more than one block (an old copy that was never cleared, a copy of a block):
+         * one entry stays, so that every lookup gives the same block. A block with a right checksum goes before one
+         * with a wrong checksum; among equals the lowest block number wins (the blocks of a key are in that order). */
+        for (i = 0; i < img->noidx; i = j) {
+            size_t best = i;
+            j = i + 1;
+            while (j < img->noidx && img->oidx[j].key == img->oidx[i].key) j++;
+            if (j - i > 1) {
+                size_t m;
+                for (m = i; m < j; m++)
+                    if (adf_sum(img->data + (size_t)img->oidx[m].blk * ADF_BLOCK_SIZE) == 0) {
+                        best = m;
+                        break;
+                    }
+                img->n_dup += (uint32_t)(j - i - 1);
+            }
+            img->oidx[k++] = img->oidx[best];
+        }
+        img->noidx = k;
+    }
+}
+
+/* OFS data blocks with a right checksum and a plausible (file header, sequence number). A disk that has neither a root
+ * block nor any file header block but still has them holds files that can be rebuilt from their data blocks */
+static unsigned adf_valid_data_blocks(const adf_img_t *img)
+{
+    uint32_t b;
+    unsigned n = 0;
+    for (b = 2; b < img->nblk; b++) {
+        const uint8_t *blk = img->data + (size_t)b * ADF_BLOCK_SIZE;
+        uint32_t hk, seq;
+        if (read_be32(blk) != T_DATA || adf_sum(blk) != 0) continue;
+        hk = read_be32(blk + 4);
+        seq = read_be32(blk + 8);
+        if (hk < 2 || hk >= img->nblk || seq == 0 || seq > img->nblk || read_be32(blk + 12) > ADF_BLOCK_SIZE - 24) continue;
+        n++;
+    }
+    return n;
 }
 
 /* first entry with key >= `key` (index in oidx), noidx if none */
@@ -2139,61 +2941,112 @@ static uint64_t adf_oidx_size(adf_img_t *img, uint32_t hk)
            read_be32(img->data + (size_t)last->blk * ADF_BLOCK_SIZE + 12);
 }
 
+/* How a data block of an OFS file turned out (adf_ofs_pick) */
+#define OB_INDEX    0x01u   /* not the block that the table names: found through the index (header, sequence) */
+#define OB_SUMBAD   0x02u   /* wrong checksum: the data are used, but nothing says that they are right */
+#define OB_SHORT    0x04u   /* the block holds fewer bytes than the file needs at this position: the rest is zero */
+#define OB_HDRBAD   0x08u   /* damaged header: the body is used as it is */
+#define OB_FOREIGN  0x10u   /* (not used) a right data block of another file or of another position */
+#define OB_UNSURE   (OB_SUMBAD | OB_SHORT | OB_HDRBAD)   /* kept, but the file can no longer be called right */
+
 /*
- * One data block of an OFS file: `db` is what the block table says (0 if the table is lost), `seq` the
- * position (from 1) in the file. A block of another file (its header_key or sequence number differ) or a
- * missing/damaged one is replaced by the block that names this file with this sequence number, if there is one.
- * A block that is not a data block but has no other structure (its header is damaged) gives its 488 bytes.
- * Returns 0 (right), 1 (found through the index: right), 2 (damaged header, body used as it is), -1 (unreadable).
+ * How well block `d` can stand for data block number `seq` (from 1) of the OFS file whose header is `hdr_blk`, which
+ * needs `expect` bytes there. 4: verified (it names this file and this position, its checksum is right and it holds all
+ * the bytes); 3: right but too short; 2: the checksum is wrong; 1: the header is damaged, the body is used as it is;
+ * 0: not usable. *len is how many bytes to copy and *st the OB_* flag that goes with the grade.
+ * A data block that names another file or position is used only if its checksum is wrong, which is how a damaged
+ * header looks. With a right checksum it is a right block of something else, and it is never copied into this file.
  */
-static int adf_ofs_pick(adf_img_t *img, uint32_t hdr_blk, uint32_t seq, uint32_t db, size_t expect,
-                        const uint8_t **src, size_t *len)
+static int adf_ofs_grade(const uint8_t *d, uint32_t hdr_blk, uint32_t seq, size_t expect, size_t *len, unsigned *st)
 {
-    const uint8_t *d = adf_block(img, db);
-    uint32_t ib;
+    uint32_t t = read_be32(d);
     size_t i;
 
-    if (d && read_be32(d) == T_DATA) {
+    *len = 0;
+    *st = 0;
+    if (t == T_DATA) {
         uint32_t dsz = read_be32(d + 12);
-        bool mine = read_be32(d + 4) == hdr_blk && read_be32(d + 8) == seq;
-        if (!mine && (ib = adf_oidx_find(img, hdr_blk, seq)) != 0 && ib != db) {
-            d = adf_block(img, ib);
-            *src = d + 24;
-            *len = read_be32(d + 12) < expect ? read_be32(d + 12) : expect;
+        bool sum_ok = adf_sum(d) == 0;
+        if (read_be32(d + 4) != hdr_blk || read_be32(d + 8) != seq) {
+            if (sum_ok) {
+                *st = OB_FOREIGN;
+                return 0;
+            }
+            *st = OB_HDRBAD;
+            *len = expect;
             return 1;
         }
-        if (dsz <= ADF_BLOCK_SIZE - 24) {
+        if (dsz > ADF_BLOCK_SIZE - 24) {
+            *st = OB_HDRBAD;
+            *len = expect;
+            return 1;
+        }
+        *len = dsz < expect ? dsz : expect;
+        if (!sum_ok) {
+            *st = OB_SUMBAD;
+            return 2;
+        }
+        if (dsz < expect) {
+            *st = OB_SHORT;
+            return 3;
+        }
+        return 4;
+    }
+    if (t == T_HEADER || t == T_LIST || t == T_DIRC) return 0;
+    for (i = 24; i < ADF_BLOCK_SIZE; i++)
+        if (d[i]) {                      /* no structure of the file system, but data: only its header is damaged */
+            *st = OB_HDRBAD;
+            *len = expect;
+            return 1;
+        }
+    return 0;
+}
+
+/*
+ * One data block of an OFS file: `db` is what the block table says (0 if the table is lost), `seq` the position (from 1)
+ * in the file, `expect` the bytes that the file needs there. The block of the table is used if it is verified. Else the
+ * block that names this file and this position (adf_oidx_find) is used if it is better. Else the table's block is used
+ * as well as it can be (OB_SUMBAD, OB_SHORT, OB_HDRBAD in *st: the file is then "incomplete or unverified"), unless it is
+ * a right block of another file (OB_FOREIGN) or no data block at all.
+ * Returns 0 (src and len are set, *blk is the block used, *st how it turned out) or -1 (nothing can be used).
+ */
+static int adf_ofs_pick(adf_img_t *img, uint32_t hdr_blk, uint32_t seq, uint32_t db, size_t expect,
+                        const uint8_t **src, size_t *len, unsigned *st, uint32_t *blk)
+{
+    const uint8_t *d = adf_block(img, db), *c = NULL;
+    uint32_t ib;
+    size_t dlen = 0, clen = 0;
+    unsigned dst = 0, cst = 0;
+    int dq = 0, cq = 0;
+
+    *src = NULL;
+    *len = 0;
+    *st = 0;
+    *blk = db;
+    if (d) {
+        dq = adf_ofs_grade(d, hdr_blk, seq, expect, &dlen, &dst);
+        if (dq == 4) {                                   /* the usual case */
             *src = d + 24;
-            *len = dsz < expect ? dsz : expect;
+            *len = dlen;
             return 0;
         }
-        if ((ib = adf_oidx_find(img, hdr_blk, seq)) != 0) {
-            d = adf_block(img, ib);
-            *src = d + 24;
-            *len = read_be32(d + 12) < expect ? read_be32(d + 12) : expect;
-            return 1;
-        }
+    }
+    ib = adf_oidx_find(img, hdr_blk, seq);
+    if (ib != 0 && ib != db && (c = adf_block(img, ib)) != NULL) cq = adf_ofs_grade(c, hdr_blk, seq, expect, &clen, &cst);
+    if (cq > dq) {
+        *src = c + 24;
+        *len = clen;
+        *st = cst | OB_INDEX;
+        *blk = ib;
+        return 0;
+    }
+    if (dq > 0) {
         *src = d + 24;
-        *len = expect;
-        return 2;
+        *len = dlen;
+        *st = dst;
+        return 0;
     }
-    if ((ib = adf_oidx_find(img, hdr_blk, seq)) != 0) {
-        d = adf_block(img, ib);
-        *src = d + 24;
-        *len = read_be32(d + 12) < expect ? read_be32(d + 12) : expect;
-        return 1;
-    }
-    if (d) {
-        uint32_t t = read_be32(d);
-        if (t != T_HEADER && t != T_LIST && t != 33 /* directory cache */) {
-            for (i = 24; i < ADF_BLOCK_SIZE; i++)
-                if (d[i]) {
-                    *src = d + 24;
-                    *len = expect;
-                    return 2;
-                }
-        }
-    }
+    *st = dst;
     return -1;
 }
 
@@ -2204,12 +3057,16 @@ static int adf_ofs_pick(adf_img_t *img, uint32_t hdr_blk, uint32_t seq, uint32_t
  * offset 504. Every block is placed at its position (i * block size, as the
  * file system does). A block that cannot be read is replaced by zeros of the
  * length it should have had, and the file is reported as incomplete; the file
- * is deleted only if no block is readable. In an OFS file the blocks
- * that the table cannot give (broken chain, damaged block header, block of
- * another file) are looked up by (header, sequence number), and a size field
+ * is deleted only if no block is readable. In an OFS file every data block is
+ * verified (adf_ofs_pick): the blocks that the table cannot give or that fail the
+ * checks (broken chain, damaged block header, block of another file, wrong checksum,
+ * too few bytes) are looked up by (header, sequence number), and a size field
  * that makes no sense is taken from the data blocks.
- * Returns 0 (with *out malloc'ed, also for an empty file), 1 (incomplete) or -1. out == NULL: a dry run that only
- * reports the state of the file.
+ * What is kept although it is not verified (a data block with a wrong checksum, a
+ * damaged header or too few bytes; a header or an extension block with a wrong
+ * checksum) makes the file incomplete too: *bad_out counts those blocks.
+ * Returns 0 (with *out malloc'ed, also for an empty file), 1 (incomplete or
+ * unverified) or -1. out == NULL: a dry run that only reports the state of the file.
  */
 static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
                          uint8_t **out, size_t *out_size, unsigned *bad_out)
@@ -2223,6 +3080,13 @@ static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
     if (out) *out = NULL;
     if (out_size) *out_size = 0;
     *bad_out = 0;
+    if (adf_sum(hdr) != 0) {                            /* kept (best effort), but the table and the size are not verified */
+        adf_fail(img, "file '%s': header block %u has a wrong checksum: its data are used but not verified", nm,
+                 hdr_blk);
+        adf_note_bad(img, hdr_blk);
+        noted = true;
+        bad++;
+    }
     byte_size = read_be32(hdr + 324);
     if ((uint64_t)byte_size > img->size) {
         uint64_t sz = adf_oidx_size(img, hdr_blk);
@@ -2244,7 +3108,8 @@ static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
             return -1;
         }
         if (out) *out = (uint8_t *)xmalloc(1);
-        return 0;
+        *bad_out = bad;
+        return bad ? 1 : 0;
     }
 #define ADF_NOTE(...)                                                               \
     do {                                                                            \
@@ -2276,6 +3141,11 @@ static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
             ADF_NOTE("file '%s': block %u is not an extension block", nm, ext);
             break;
         }
+        if (adf_sum(cur) != 0) {
+            ADF_NOTE("file '%s': extension block %u has a wrong checksum: its data are used but not verified", nm, ext);
+            adf_note_bad(img, ext);
+            bad++;
+        }
         if (++ext_steps > img->nblk) {
             ADF_NOTE("file '%s': cycle in the block chain", nm);
             break;
@@ -2287,7 +3157,8 @@ static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
         size_t expect = left < per_blk ? left : per_blk, len = 0;
         uint32_t db = i < got ? ptr[i] : 0;
         const uint8_t *d = adf_block(img, db), *src = NULL;
-        int q;
+        unsigned st = 0;
+        uint32_t ub = db;
 
         if (img->is_ffs) {
             if (d) {
@@ -2299,21 +3170,33 @@ static int adf_file_data(adf_img_t *img, uint32_t hdr_blk, const char *nm,
             }
             continue;
         }
-        q = adf_ofs_pick(img, hdr_blk, i + 1, db, expect, &src, &len);
-        if (q < 0) {
+        if (adf_ofs_pick(img, hdr_blk, i + 1, db, expect, &src, &len, &st, &ub) < 0) {
             if (i < got) {
-                if (!d) ADF_NOTE("file '%s': data block pointer %u outside the image", nm, db);
-                else { ADF_NOTE("file '%s': block %u is not a data block", nm, db); adf_note_bad(img, db); }
+                if (!d) {
+                    ADF_NOTE("file '%s': data block pointer %u outside the image", nm, db);
+                } else {
+                    if (st & OB_FOREIGN)
+                        ADF_NOTE("file '%s': block %u belongs to another file or position: it is not used", nm, db);
+                    else
+                        ADF_NOTE("file '%s': block %u is not a data block", nm, db);
+                    adf_note_bad(img, db);
+                }
             }
             bad++;
             continue;
         }
         if (buf) memcpy(buf + off, src, len);
         good++;
-        if (q == 1) found++;
-        else if (q == 2) {
-            ADF_NOTE("file '%s': block %u has a damaged header: its data are used as they are", nm, db);
-            adf_note_bad(img, db);
+        if (st & OB_INDEX) found++;
+        if (st & OB_UNSURE) {                           /* kept, but not verified: the file is not "right" */
+            if (st & OB_SUMBAD)
+                ADF_NOTE("file '%s': block %u has a wrong checksum: its data are used but not verified", nm, ub);
+            else if (st & OB_SHORT)
+                ADF_NOTE("file '%s': block %u holds %u of the %u bytes that the file needs there: the rest is zero", nm,
+                         ub, (unsigned)len, (unsigned)expect);
+            else
+                ADF_NOTE("file '%s': block %u has a damaged header: its data are used as they are", nm, ub);
+            adf_note_bad(img, ub);
             bad++;
         }
     }
@@ -2373,6 +3256,11 @@ static void adf_dir_read(adf_img_t *img, uint32_t dir_blk, bool mark, adf_ent_t 
                 adf_fail(img, "block %u is not a header block (type %u)", b, read_be32(eh));
                 adf_note_bad(img, b);
                 break;
+            }
+            /* a header with a wrong checksum is kept (best effort) but flagged; a file says so itself (adf_file_data) */
+            if ((int32_t)read_be32(eh + 508) != ST_FILE && adf_sum(eh) != 0) {
+                adf_fail(img, "header block %u has a wrong checksum", b);
+                adf_note_bad(img, b);
             }
             if (n >= cap) {
                 cap = cap ? cap * 2 : 32;
@@ -2615,8 +3503,9 @@ static uint8_t *adf_group_data(adf_img_t *img, const adf_rdata_t *g, size_t *siz
 /*
  * Opens the image: geometry (a size that is not a multiple of 512, a bootblock that is not DOS with a valid root, a
  * root with a wrong checksum, no root at all), the OFS/FFS flavor read from the data, the walk of the whole disk
- * and, if it had errors or there is no root, the recovery. Returns 0 if the image can be shown, -1 if it is not a
- * DOS disk at all (img is then freed).
+ * and, if it had errors or there is no root, the recovery. A disk with neither a root block nor a file header is
+ * still opened when it has OFS data blocks with a right checksum: the recovery rebuilds its files from them.
+ * Returns 0 if the image can be shown, -1 if it is not a DOS disk at all (img is then freed).
  */
 static int adf_open(adf_img_t *img, uint8_t *data, uint64_t size)
 {
@@ -2628,7 +3517,12 @@ static int adf_open(adf_img_t *img, uint8_t *data, uint64_t size)
     img->size = size;
     rootless = adf_find_geometry(img, &why) != 0;
     if (rootless && img->nblk >= 8) adf_scan_headers(img);
-    if (rootless && img->nhf == 0) {
+    if (rootless && img->nhf == 0 && img->nblk >= 8 && adf_valid_data_blocks(img) >= 2) {
+        img->is_ffs = 0;
+        img->strict_oidx = true;
+        img->headerless = true;
+    }
+    if (rootless && img->nhf == 0 && !img->headerless) {
         log_error("ADF: not a DOS disk: %s", why);
         adf_free(img);
         return -1;
@@ -2640,7 +3534,10 @@ static int adf_open(adf_img_t *img, uint8_t *data, uint64_t size)
     img->badtrk = (uint8_t *)xcalloc(img->ntracks ? img->ntracks : 1, 1);
     img->visited = (uint8_t *)xcalloc(img->nblk, 1);
     img->seen = (uint32_t *)xcalloc(img->nblk, sizeof(uint32_t));
-    if (rootless)
+    if (img->headerless)
+        log_msg("  ADF without a usable root block and without file headers (%s): files rebuilt from the OFS data blocks",
+                why);
+    else if (rootless)
         log_msg("  ADF without a usable root block (%s): %llu file header block(s) found, %s", why, (unsigned long long)img->nhf,
                 img->is_ffs ? "FFS" : "OFS");
     else
@@ -2656,6 +3553,14 @@ static int adf_open(adf_img_t *img, uint8_t *data, uint64_t size)
         adf_walk_dir(img, img->root_blk, 0);
     }
     if (rootless || img->has_error) adf_recovery_build(img);
+    if (img->headerless && img->nrdata == 0) {         /* nothing could be rebuilt */
+        log_error("ADF: not a DOS disk: %s", why);
+        adf_free(img);
+        return -1;
+    }
+    if (img->n_dup)
+        log_msg("  ADF: %u OFS data block(s) name the same file and position as another block: the one with a right "
+                "checksum is used, else the one with the lowest block number", img->n_dup);
     return 0;
 }
 
@@ -2837,7 +3742,7 @@ static struct PluginStartupInfo Psi;
     X(MValDirBlock,          L"Block %u (items: %d)") \
     /* descriptions of the items of the panel */ \
     X(MDescUnreadable,       L"unreadable") \
-    X(MDescIncomplete,       L"incomplete (unreadable blocks)") \
+    X(MDescIncomplete,       L"incomplete or unverified blocks") \
     X(MDescSizeFixed,        L"size taken from the data blocks") \
     X(MDescRecFile,          L"recovered from the header") \
     X(MDescRecData,          L"data blocks without a header") \
@@ -2846,7 +3751,7 @@ static struct PluginStartupInfo Psi;
     X(MDescReport,           L"what was found and repaired") \
     /* the box shown when a file that the plug-in recognizes cannot be opened: the name of the file, then one of these */ \
     X(MErrDiskType,          L"This archive does not hold a disk image (disk type 7)") \
-    X(MErrEncrypted,         L"This DMS archive is encrypted") \
+    X(MErrEncrypted,         L"This DMS archive is encrypted and its decryption key was not found") \
     X(MErrNoDisk,            L"No disk that can be read was found in this file") \
     X(MErrRead,              L"The file cannot be read, or its size is not valid") \
     X(MErrMemory,            L"Not enough memory to open the file") \
@@ -2868,7 +3773,12 @@ static struct PluginStartupInfo Psi;
     X(MBtnOverwriteAll,      L"Overwrite &all") \
     X(MBtnSkipAll,           L"S&kip all") \
     X(MErrDest,              L"Cannot create the destination folder:") \
-    X(MCopyFailed,           L"Items that could not be copied: %u")
+    X(MCopyFailed,           L"Items that could not be copied: %u") \
+    /* information panel, descriptions of the items and summary of the copy: more texts */ \
+    X(MValContainerDmsEnc,   L"DMS Compressed, encrypted") \
+    X(MValRootMissingData,   L"missing: files rebuilt from data blocks") \
+    X(MCopyPartial,          L"Items copied incomplete or unverified: %u") \
+    X(MErrDialog,            L"The copy dialog cannot be shown: nothing was copied.")
 
 enum {
 #define ADF_MSG_ID(id, text) id,
@@ -3391,7 +4301,7 @@ static PluginData *pd_open(const wchar_t *name, int *why)
             compute_bad_tracks(pd);
             pd->Damaged = !pd->AdfOk || (pd->AdfOk && (pd->Adf.has_error || pd->Adf.root_damaged || pd->Adf.rootless)) ||
                           (pd->IsDMS && (pd->Dms.any_error || pd->Dms.n_repaired || pd->Dms.hdr_repaired ||
-                                         !pd->Dms.sig_ok || pd->Dms.budget_hit || pd->TotalBadTracksCount));
+                                         !pd->Dms.sig_ok || pd->Dms.budget_hit || pd->Dms.key_hit || pd->TotalBadTracksCount));
             pd->HasReport = pd->Damaged && pd->Log.lines > 0;
             if (pd->HasReport) build_report(pd);
         }
@@ -3400,6 +4310,7 @@ static PluginData *pd_open(const wchar_t *name, int *why)
     if (failed || !usable) {
         /* (memory of an aborted call is lost; what was set up is released) */
         *why = failed ? REFUSE_MEMORY : (pd->IsDMS && pd->Dms.refuse != REFUSE_NONE ? pd->Dms.refuse : REFUSE_NODISK);
+        adf_free(&pd->Adf);                    /* an adf_open that was cut short by the lack of memory leaves its tables */
         if (pd->IsDMS) dms_out_free(&pd->Dms); else free(pd->Image);
         free(raw);
         free(pd->Log.text);
@@ -3500,6 +4411,7 @@ typedef struct {
     int      silent;                                           /* no box at all (Far works silently, or a viewer or an editor asked) */
     int      cancelled;                                        /* Cancel in the box about a file that exists */
     unsigned copied, skipped, failed;
+    unsigned partial;                                          /* of the copied ones: written, but with blocks missing or not verified */
 } XCtx;
 
 static int g_copy_mode = XM_ASK;                               /* what the dialog proposes: the last choice made */
@@ -3615,7 +4527,7 @@ static void extract_file(PluginData *pd, int kind, DWORD id, const wchar_t *outp
     const BYTE *buf;
     size_t size;
     int owned, rc;
-    volatile int ok = 0, failed = 0;
+    volatile int ok = 0, failed = 0, partial = 0;
     HANDLE h;
 
     if (!may_write(outpath, x)) return;
@@ -3627,12 +4539,19 @@ static void extract_file(PluginData *pd, int kind, DWORD id, const wchar_t *outp
                 ok = write_all(h, buf, size);
                 if (ok && has_time(ft)) SetFileTime(h, ft, NULL, ft);     /* original date and time of the Amiga file */
                 CloseHandle(h);
+                if (!ok) DeleteFileW(outpath);       /* a file cut short by a write error must not pass for a copy */
             }
+            if (rc == 1) partial = 1;
             if (owned) free((void *)buf);
         }
     OOM_GUARD_END(failed)
     pd->Adf.quiet = 0;
-    if (ok && !failed) x->copied++; else x->failed++;
+    if (ok && !failed) {
+        x->copied++;
+        if (partial) x->partial++;
+    } else {
+        x->failed++;
+    }
 }
 
 /* creates a folder of the destination; 1 if it is there afterwards (a file with that name is in the way: 0) */
@@ -3824,7 +4743,7 @@ static int copy_dialog(const struct GetFilesInfo *Info, wchar_t *typed, size_t t
 void WINAPI GetGlobalInfoW(struct GlobalInfo *Info) {
     Info->StructSize    = sizeof(struct GlobalInfo);
     Info->MinFarVersion = MAKEFARVERSION(3, 0, 0, 3000, VS_RELEASE);
-    Info->Version       = MAKEFARVERSION(2, 3, 0, 0, VS_RELEASE);     /* 2.3.0: Far wants four numbers, the build is 0 */
+    Info->Version       = MAKEFARVERSION(2, 4, 3, 0, VS_RELEASE);     /* Far wants four numbers, the build is 0 */
     Info->Guid          = MainGuid;
     Info->Title         = PLUGIN_NAME;
     Info->Description   = PLUGIN_DESC;
@@ -3953,7 +4872,8 @@ void WINAPI GetOpenPanelInfoW(struct OpenPanelInfo *Info) {
     Info->PanelTitle = pd->Title;
     Info->CurDir     = pd->CurrentPath;
 
-    n = info_line(pd, n, MInfoContainer, L"%ls", GetMsg(pd->IsDMS ? MValContainerDms : MValContainerAdf));
+    n = info_line(pd, n, MInfoContainer, L"%ls",
+                  GetMsg(!pd->IsDMS ? MValContainerAdf : pd->Dms.encrypted ? MValContainerDmsEnc : MValContainerDms));
     if (pd->AdfOk)
         n = info_line(pd, n, MInfoFileSystem, GetMsgFmt(pd->Adf.boot_ok ? MValFsAmiga : MValFsAmigaCustomBoot),
                       pd->Adf.is_ffs ? L"FFS" : L"OFS");
@@ -3969,7 +4889,7 @@ void WINAPI GetOpenPanelInfoW(struct OpenPanelInfo *Info) {
     /* the state of the disk and what the recovery did */
     if (pd->AdfOk) {
         if (pd->Adf.rootless)
-            n = info_line(pd, n, MInfoRootBlock, L"%ls", GetMsg(MValRootMissing));
+            n = info_line(pd, n, MInfoRootBlock, L"%ls", GetMsg(pd->Adf.headerless ? MValRootMissingData : MValRootMissing));
         else if (pd->Adf.root_damaged)
             n = info_line(pd, n, MInfoRootBlock, L"%ls", GetMsg(MValRootBadSum));
         else
@@ -4101,7 +5021,7 @@ intptr_t WINAPI GetFilesW(struct GetFilesInfo *Info) {
     if (Info->ItemsNumber == 0) return 1;
     if (wcslen(Info->DestPath) >= MAX_PATH) return 0;
     memset(&x, 0, sizeof x);
-    x.mode = XM_OVERWRITE;
+    x.mode = XM_ASK;                           /* what an existing file gets without a dialog is never decided here */
     x.silent = ((unsigned long long)Info->OpMode & ((unsigned long long)OPM_SILENT | (unsigned long long)OPM_VIEW |
                 (unsigned long long)OPM_EDIT | (unsigned long long)OPM_QUICKVIEW | (unsigned long long)OPM_FIND |
                 (unsigned long long)OPM_DESCR)) != 0;
@@ -4110,13 +5030,15 @@ intptr_t WINAPI GetFilesW(struct GetFilesInfo *Info) {
         int mode = g_copy_mode;
         int r = copy_dialog(Info, typed, MAX_PATH * 2, &mode);
         if (r == 0) return -1;                 /* cancelled: nothing is done, Far keeps the selection */
-        if (r > 0) {
-            g_copy_mode = mode;
-            x.mode = mode;
-            if (!resolve_dest(Info->DestPath, typed, dest, MAX_PATH) || !make_dirs(dest)) {
-                box_text(MCopyTitle, GetMsg(MErrDest), typed);
-                return 0;
-            }
+        if (r < 0) {                           /* no dialog: nothing is copied, no file is overwritten unasked */
+            box_text(MCopyTitle, GetMsg(MErrDialog), NULL);
+            return 0;
+        }
+        g_copy_mode = mode;
+        x.mode = mode;
+        if (!resolve_dest(Info->DestPath, typed, dest, MAX_PATH) || !make_dirs(dest)) {
+            box_text(MCopyTitle, GetMsg(MErrDest), typed);
+            return 0;
         }
     }
     for (i = 0; i < Info->ItemsNumber && !x.cancelled; i++) {
@@ -4143,10 +5065,12 @@ intptr_t WINAPI GetFilesW(struct GetFilesInfo *Info) {
     }
     Info->DestPath = dest;
     if (x.cancelled) return -1;
-    if (x.failed && !x.silent) {
-        wchar_t msg[96];
-        wfmt(msg, 96, GetMsgFmt(MCopyFailed), x.failed);
-        box_text(MCopyTitle, msg, NULL);
+    if ((x.failed || x.partial) && !x.silent) {
+        wchar_t fail[96], part[96];
+        wfmt(fail, 96, GetMsgFmt(MCopyFailed), x.failed);
+        wfmt(part, 96, GetMsgFmt(MCopyPartial), x.partial);
+        if (x.failed && x.partial) box_text(MCopyTitle, fail, part);
+        else box_text(MCopyTitle, x.failed ? fail : part, NULL);
     }
     return (x.copied > 0 || x.skipped > 0 || x.failed == 0) ? 1 : 0;
 }
